@@ -3088,7 +3088,7 @@
            listening, white dots while answering, badge + glow when an
            answer is waiting. */
         .pip-mini { display: none; position: relative; flex-direction: column; align-items: center; justify-content: center; gap: 9px; width: 100%; height: 100%; padding: 0; border: none; background: transparent; cursor: pointer; font-family: inherit; }
-        body.pip-collapsed .pip-head, body.pip-collapsed .pip-live, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-inputrow { display: none; }
+        body.pip-collapsed .pip-head, body.pip-collapsed .pip-live, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-toolbar, body.pip-collapsed .pip-inputrow { display: none; }
         body.pip-collapsed .pip-mini { display: flex; }
         .pip-mini-stage { position: relative; width: 72px; height: 72px; }
         .pip-mini-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--cyan); opacity: 0; pointer-events: none; }
@@ -3167,6 +3167,21 @@
         .pip-tdot:nth-child(1) { animation-delay: -0.32s; }
         .pip-tdot:nth-child(2) { animation-delay: -0.16s; }
         @keyframes pipDot { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
+        /* Read-aloud toggle — mirrors the main tab's voice switch so the
+           pop-out can mute/unmute Randy's spoken answers. */
+        .pip-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 12px; background: #fff; border-top: 1px solid var(--divider); flex-shrink: 0; }
+        .pip-speak { display: inline-flex; align-items: center; gap: 7px; font-size: 11.5px; font-weight: 600; color: #6B7693; cursor: pointer; user-select: none; transition: color 0.15s; }
+        .pip-speak:hover { color: var(--navy); }
+        .pip-speak.on { color: var(--primary); }
+        .pip-speak svg { width: 15px; height: 15px; flex-shrink: 0; }
+        .pip-speak .pip-ic-on { display: none; }
+        .pip-speak.on .pip-ic-on { display: inline-block; }
+        .pip-speak.on .pip-ic-off { display: none; }
+        .pip-switch { position: relative; display: inline-flex; width: 38px; height: 21px; border-radius: 999px; background: #C3CBDC; cursor: pointer; transition: background 0.2s; flex-shrink: 0; }
+        .pip-switch:focus-visible { outline: none; box-shadow: 0 0 0 3px rgba(3,114,255,0.28); }
+        .pip-switch.on { background: var(--primary); }
+        .pip-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: left 0.2s; box-shadow: 0 1px 3px rgba(22,31,91,0.25); }
+        .pip-switch.on::after { left: 19px; }
         .pip-inputrow { display: flex; gap: 8px; align-items: center; padding: 10px; border-top: 1px solid var(--divider); background: #fff; flex-shrink: 0; }
         .pip-inputrow input { flex: 1; min-width: 0; border: 1.5px solid var(--divider); border-radius: 9999px; padding: 9px 14px; font-size: 13px; outline: none; color: var(--navy); font-family: inherit; }
         .pip-inputrow input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0,191,255,0.16); }
@@ -3255,6 +3270,14 @@
             </div>
           </div>
           <div class="pip-msgs" id="pip-msgs"></div>
+          <div class="pip-toolbar">
+            <label class="pip-speak" id="pip-speak" data-action="pip-toggle-speak" title="Read each answer aloud">
+              <svg class="pip-ic-on" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3l3.8 3.8a.7.7 0 0 0 1.2-.5Z"/><path d="M16 9a5 5 0 0 1 0 6"/><path d="M19.4 5.6a10 10 0 0 1 0 12.8"/></svg>
+              <svg class="pip-ic-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M11 4.7a.7.7 0 0 0-1.2-.5L6 8H3a1 1 0 0 0-1 1v6a1 1 0 0 0 1 1h3l3.8 3.8a.7.7 0 0 0 1.2-.5Z"/><line x1="22" y1="9" x2="16" y2="15"/><line x1="16" y1="9" x2="22" y2="15"/></svg>
+              <span>Read aloud</span>
+            </label>
+            <span class="pip-switch" id="pip-switch" role="switch" aria-checked="false" aria-label="Read answers aloud" tabindex="0" data-action="pip-toggle-speak"></span>
+          </div>
           <div class="pip-inputrow">
             <input type="text" id="pip-input" placeholder="Message ${escAttr(label)}…" autocomplete="off" />
             <button class="pip-send" id="pip-send" data-action="pip-send" title="Send message" aria-label="Send message">
@@ -3281,6 +3304,7 @@
           if (e.target.closest('[data-action="pip-send"]')) { sendFromPip(); return; }
           if (e.target.closest('[data-action="pip-minimize"]')) { collapsePip(); return; }
           if (e.target.closest('[data-action="pip-expand"]')) { expandPip(); return; }
+          if (e.target.closest('[data-action="pip-toggle-speak"]')) { toggleSpeakFromPip(); return; }
           const cp = e.target.closest('[data-action="pip-copy"]');
           if (cp) copyFromPip(cp);
         });
@@ -3288,6 +3312,11 @@
           if (e.key === 'Enter' && !e.shiftKey && e.target && e.target.id === 'pip-input') {
             e.preventDefault();
             sendFromPip();
+            return;
+          }
+          if ((e.key === 'Enter' || e.key === ' ') && e.target && e.target.id === 'pip-switch') {
+            e.preventDefault();
+            toggleSpeakFromPip();
           }
         });
         w.addEventListener('pagehide', () => {
@@ -3309,6 +3338,18 @@
         PIP.lastHtml = '';
         renderPip();
         if (!collapsed) setTimeout(() => { try { doc.getElementById('pip-input').focus(); } catch {} }, 50);
+      }
+
+      // Mute / unmute Randy's spoken answers from the pop-out. Shares the
+      // same slot.speakAnswers flag as the main tab's switch, so toggling
+      // here and there stays in sync; render() refreshes both views.
+      function toggleSpeakFromPip() {
+        const slot = STATE.slots[PIP.slotIdx];
+        if (!slot) return;
+        slot.speakAnswers = !slot.speakAnswers;
+        saveSettings();
+        if (!slot.speakAnswers && slot.isSpeaking) stopSpeaking();
+        render();
       }
 
       function sendFromPip() {
@@ -3629,6 +3670,21 @@
 
           // Live transcript / processing band.
           updatePipLive(slot);
+
+          // Read-aloud switch — keep in sync with slot.speakAnswers (it can
+          // also be toggled from the main tab).
+          const speakOn = !!slot.speakAnswers;
+          const speakLbl = doc.getElementById('pip-speak');
+          if (speakLbl) {
+            speakLbl.classList.toggle('on', speakOn);
+            const t = speakOn ? 'Randy reads each answer aloud — click to mute' : 'Answers stay silent — click to have Randy read them aloud';
+            if (speakLbl.title !== t) speakLbl.title = t;
+          }
+          const speakSw = doc.getElementById('pip-switch');
+          if (speakSw) {
+            speakSw.classList.toggle('on', speakOn);
+            speakSw.setAttribute('aria-checked', speakOn ? 'true' : 'false');
+          }
 
           // Collapsed icon: listening → answering → answer-ready.
           const mini = doc.getElementById('pip-mini');
