@@ -524,7 +524,7 @@
         '2. The question is in scope per the lists above.',
         '3. An SE could plausibly answer it now without asking anything back.',
         '',
-        'confidence is your 0-to-1 certainty that auto-answering helps. Below 0.6 means do not act. Be conservative; false positives interrupt a live call. Speech-to-text may garble product names ("in tune" = Intune, "config manager"/"SCCM" = ConfigMgr, "liquid" = Liquit) — interpret charitably but do not invent a question that is not there.',
+        'confidence is your 0-to-1 certainty that auto-answering helps. Below 0.6 means do not act. Be conservative; false positives interrupt a live call. Speech-to-text may garble product names ("in tune" = Intune, "config manager"/"SCCM"/"MECM" = ConfigMgr, "liquid" = Liquit, "auto pilot" = Autopilot, "right click tools" = Right Click Tools) — interpret charitably but do not invent a question that is not there.',
         '',
         'Respond with ONLY a JSON object — no prose, no code fences: {"is_question": boolean, "confidence": number 0-1, "topic": "short phrase", "reason": "max 12 words"}'
       ].join('\n');
@@ -558,6 +558,43 @@
       const INSTANT_QUESTION_RE = /^(how|what|why|when|where|which|who|can|could|does|do|did|is|are|will|would|should|tell me|walk me through|explain|show me)\b|\b(how (do|does|did|can|could|would|will)|what (is|are|about|does|happens)|can (it|you|we|they)|does (it|that|this)|is there|are there)\b/i;
       function isInstantTechQuestion(t) {
         return TECH_TOPIC_RE.test(t) && INSTANT_QUESTION_RE.test(t);
+      }
+
+      // Commercial / non-technical asks an SE shouldn't auto-answer on a live
+      // call even when they name an in-scope product ("what's Application
+      // Workspace cost per seat?"). These bypass the no-classifier fast path
+      // and fall through to the classifier, which already treats pricing,
+      // contracts, and scheduling as out of scope. The guard only ever ADDS a
+      // classifier round-trip — it never drops a question on its own.
+      const OUT_OF_SCOPE_RE = /\bhow much (?:do(?:es)?|is|are|would|will)\b|\b(pric(?:e|ing|ed)|quote|discount|per[\s-]?(?:seat|device|user)|license(?:s|ing)? (?:cost|fee|price|pricing)|renewal|contract|invoice|proposal|budget|sales ?rep|account (?:manager|exec))\b/i;
+
+      // Common speech-to-text garbles of endpoint-management product names.
+      // Applied to overheard utterances before they're classified, answered,
+      // and logged, so Randy reasons over "Intune", not "in tune", and the
+      // tech-topic detector and saved Q&A read cleanly. Kept tight: each
+      // pattern targets a phrase that is overwhelmingly the product on these
+      // calls. Correction never feeds the no-classifier fast path (that still
+      // runs on the raw text), so a wrong guess can only route to the
+      // classifier — it can never auto-answer on its own.
+      const TRANSCRIPT_FIXES = [
+        [/\bin\s?tune\b/gi, 'Intune'],
+        [/\bend[\s-]?point(s)?\b/gi, 'endpoint$1'],
+        [/\bauto[\s-]?pilot\b/gi, 'Autopilot'],
+        [/\bco[\s-]?management\b/gi, 'co-management'],
+        [/\bconfig(?:uration)?[\s-]?manager\b/gi, 'ConfigMgr'],
+        [/\bconfig\s?mgr\b/gi, 'ConfigMgr'],
+        [/\bright[\s-]?click tools\b/gi, 'Right Click Tools'],
+        [/\bapp(?:lication)? workspace\b/gi, 'Application Workspace'],
+        [/\bapplication manager\b/gi, 'Application Manager'],
+        [/\bprivilege manager\b/gi, 'Privilege Manager'],
+        [/\bendpoint insights\b/gi, 'Endpoint Insights'],
+        [/\bliqu(?:id|it|ot)\b/gi, 'Liquit'],
+        [/\bre[\s-]?cast\b/gi, 'Recast']
+      ];
+      function correctTranscript(text) {
+        let t = String(text || '');
+        for (const [re, sub] of TRANSCRIPT_FIXES) t = t.replace(re, sub);
+        return t.replace(/\s+/g, ' ').trim();
       }
 
       // Voice turns attach the (slower) web_search tool only when the prompt
@@ -2025,37 +2062,47 @@
           renderAssistStatus();
           return;
         }
+        // Repair common ASR garbles of product names ("in tune" → "Intune")
+        // so detection, the answer, and the saved log all read the real
+        // term. The fast-path test below still runs on the RAW candidate, so
+        // a correction can only ever route to the classifier, never create a
+        // new auto-answer.
+        const corrected = correctTranscript(candidate);
+
         const now = Date.now();
-        if (TECH.lastSubmitted && now - TECH.lastSubmittedAt < ASSIST.DEDUPE_MS && fuzzyEqual(candidate, TECH.lastSubmitted)) {
+        if (TECH.lastSubmitted && now - TECH.lastSubmittedAt < ASSIST.DEDUPE_MS && fuzzyEqual(corrected, TECH.lastSubmitted)) {
           return;
         }
 
-        pushAssistContext(candidate);
+        pushAssistContext(corrected);
 
         // Fast path: an obvious technical question goes straight to the
-        // answer — no classifier round-trip (saves a couple of seconds).
-        if (isInstantTechQuestion(candidate)) {
-          recordAssistDecision(candidate, true, 0.85, 'instant');
-          TECH.lastSubmitted = candidate;
+        // answer — no classifier round-trip (saves a couple of seconds). The
+        // out-of-scope guard keeps pricing/contract asks about in-scope
+        // products off the fast path; they fall to the classifier, which
+        // correctly declines them.
+        if (isInstantTechQuestion(candidate) && !OUT_OF_SCOPE_RE.test(candidate)) {
+          recordAssistDecision(corrected, true, 0.85, 'instant');
+          TECH.lastSubmitted = corrected;
           TECH.lastSubmittedAt = Date.now();
-          runAssistAnswer(0, candidate);
+          runAssistAnswer(0, corrected);
           return;
         }
 
         TECH.pending = true;
         renderAssistStatus();
-        classifyUtterance(candidate, TECH.context.slice(0, -1))
+        classifyUtterance(corrected, TECH.context.slice(0, -1))
           .then(decision => {
             TECH.pending = false;
             const accepted =
               decision.is_question === true &&
               typeof decision.confidence === 'number' &&
               decision.confidence >= ASSIST.CONF_THRESHOLD;
-            recordAssistDecision(candidate, accepted, decision.confidence || 0, decision.topic || '');
+            recordAssistDecision(corrected, accepted, decision.confidence || 0, decision.topic || '');
             if (!accepted) { renderAssistStatus(); return; }
-            TECH.lastSubmitted = candidate;
+            TECH.lastSubmitted = corrected;
             TECH.lastSubmittedAt = Date.now();
-            runAssistAnswer(0, candidate);
+            runAssistAnswer(0, corrected);
           })
           .catch(err => {
             TECH.pending = false;
@@ -2063,13 +2110,13 @@
             toastPipelineError("Randy couldn't check a question", err);
             // Keep the SE alive: obvious technical questions are answered
             // even when the classifier service is down.
-            if (looksLikeTechQuestion(candidate)) {
-              recordAssistDecision(candidate, true, 0.7, 'fallback match');
-              TECH.lastSubmitted = candidate;
+            if (looksLikeTechQuestion(corrected)) {
+              recordAssistDecision(corrected, true, 0.7, 'fallback match');
+              TECH.lastSubmitted = corrected;
               TECH.lastSubmittedAt = Date.now();
-              runAssistAnswer(0, candidate);
+              runAssistAnswer(0, corrected);
             } else {
-              recordAssistDecision(candidate, false, 0, 'check failed');
+              recordAssistDecision(corrected, false, 0, 'check failed');
               renderAssistStatus();
             }
           });
