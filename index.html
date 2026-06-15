@@ -419,6 +419,7 @@
       const ASSIST = {
         DEBOUNCE_MS: 1400,        // silence gap before a buffered utterance is classified
         DEBOUNCE_FAST_MS: 900,    // shorter gap when the buffer already looks like a full question
+        DEBOUNCE_SLOW_MS: 2600,   // longer gap when the buffer trails off mid-question — wait for the rest
         MIN_CHARS: 10,            // ignore fragments shorter than this
         MIN_WORDS: 3,             // ...or with fewer words than this
         CONF_THRESHOLD: 0.65,     // classifier confidence needed to auto-answer
@@ -523,6 +524,7 @@
         '1. The latest utterance functions as a question (interrogative form or a clear ask like "walk me through how X handles Y").',
         '2. The question is in scope per the lists above.',
         '3. An SE could plausibly answer it now without asking anything back.',
+        '4. The question is COMPLETE, not cut off. If it trails off mid-thought, is a sentence fragment, or is missing the actual ask ("how does Recast…", "what about the…", "can you walk me through"), set is_question=false — wait for the rest of the question rather than answering half of it.',
         '',
         'confidence is your 0-to-1 certainty that auto-answering helps. Below 0.6 means do not act. Be conservative; false positives interrupt a live call. Speech-to-text may garble product names ("in tune" = Intune, "config manager"/"SCCM"/"MECM" = ConfigMgr, "liquid" = Liquit, "auto pilot" = Autopilot, "right click tools" = Right Click Tools) — interpret charitably but do not invent a question that is not there.',
         '',
@@ -595,6 +597,29 @@
         let t = String(text || '');
         for (const [re, sub] of TRANSCRIPT_FIXES) t = t.replace(re, sub);
         return t.replace(/\s+/g, ' ').trim();
+      }
+
+      // A real SE waits for the whole question. Speech recognition flushes on
+      // a pause, so a speaker who hesitates mid-thought ("how does Recast…")
+      // hands us a truncated fragment with no actual ask. Answering those is
+      // a false positive — detect them so the pipeline holds for the rest
+      // instead of replying to half a question. Three shapes:
+      //   1) the utterance trails off on a dangling word — an interrogative,
+      //      auxiliary/modal, article, preposition, or conjunction that can't
+      //      end a real question;
+      //   2) "<wh> <do/modal> <subject>" with nothing after ("how does Recast",
+      //      "what can Intune") — the main verb / predicate never arrived;
+      //   3) a leading yes/no "<do/modal> <subject>" with nothing after
+      //      ("does Intune", "would ConfigMgr").
+      // Copulas (is/are/was/were) are intentionally excluded so genuine short
+      // questions survive ("what is Recast", "is it supported").
+      const DANGLING_TAIL_RE = /(?:^|\s)(how|what|why|when|where|which|who|whose|do|does|did|is|are|was|were|be|been|being|am|can|could|would|will|shall|should|may|might|must|have|has|had|the|a|an|to|of|for|with|about|on|in|at|by|from|into|than|over|under|between|through|and|or|but|nor|so|if|because|while|your|my|our|their|its|his|her)$/i;
+      const WH_AUX_SUBJECT_RE = /^(how|what|why|when|where|which|who|whose)\s+(do|does|did|can|could|would|will|shall|should|may|might|must)\s+\S+$/i;
+      const AUX_SUBJECT_RE = /^(do|does|did|can|could|would|will|shall|should|may|might|must)\s+\S+$/i;
+      function isTruncatedQuestion(t) {
+        const s = String(t || '').trim().replace(/[?.!,;:]+$/, '').trim();
+        if (!s) return true;
+        return DANGLING_TAIL_RE.test(s) || WH_AUX_SUBJECT_RE.test(s) || AUX_SUBJECT_RE.test(s);
       }
 
       // Voice turns attach the (slower) web_search tool only when the prompt
@@ -2020,8 +2045,13 @@
         if (!t) return;
         TECH.buffer = (TECH.buffer + ' ' + t).trim().slice(-ASSIST.MAX_BUFFER_CHARS);
         if (TECH.bufferTimerId) clearTimeout(TECH.bufferTimerId);
-        // Complete-looking questions get a shorter quiet-gap before firing.
-        const delay = isInstantTechQuestion(TECH.buffer) ? ASSIST.DEBOUNCE_FAST_MS : ASSIST.DEBOUNCE_MS;
+        // Pick the quiet-gap by how finished the buffer sounds: a question
+        // trailing off mid-thought waits longest (for the rest to arrive), a
+        // complete-looking one fires fastest.
+        let delay;
+        if (isTruncatedQuestion(TECH.buffer)) delay = ASSIST.DEBOUNCE_SLOW_MS;
+        else if (isInstantTechQuestion(TECH.buffer)) delay = ASSIST.DEBOUNCE_FAST_MS;
+        else delay = ASSIST.DEBOUNCE_MS;
         TECH.bufferTimerId = setTimeout(flushAssistBuffer, delay);
       }
 
@@ -2065,6 +2095,14 @@
         const words = candidate.split(/\s+/).filter(Boolean);
         if (candidate.length < ASSIST.MIN_CHARS || words.length < ASSIST.MIN_WORDS) {
           recordAssistDecision(candidate, false, 0, 'too short');
+          renderAssistStatus();
+          return;
+        }
+        // The speaker trailed off mid-question ("how does Recast…") and never
+        // finished. An SE waits for the whole ask — don't answer or even
+        // classify a fragment; the continuation arrives as its own utterance.
+        if (isTruncatedQuestion(candidate)) {
+          recordAssistDecision(candidate, false, 0, 'incomplete — waiting for the full question');
           renderAssistStatus();
           return;
         }
