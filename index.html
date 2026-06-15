@@ -1900,6 +1900,11 @@
         VOICE.interimSlot = target;
         VOICE.interimAt = Date.now();
 
+        // Stream into the pop-out's live band too — patchLiveTranscript()
+        // below can short-circuit the main render, which would otherwise
+        // leave the pop-out transcript stale.
+        if (PIP.window) updatePipLive(STATE.slots[PIP.slotIdx]);
+
         if (patchLiveTranscript(trimmed)) return;
         // One render to mount the node — but never while the user is typing,
         // since render() rebuilds the DOM and would steal composer focus.
@@ -1918,6 +1923,7 @@
         if (!VOICE.interimText && VOICE.interimSlot === null) return;
         VOICE.interimText = '';
         VOICE.interimSlot = null;
+        if (PIP.window) updatePipLive(STATE.slots[PIP.slotIdx]);
         if (patchLiveTranscript('')) return;
         if (!isComposerFocused()) render();
       }
@@ -3082,7 +3088,7 @@
            listening, white dots while answering, badge + glow when an
            answer is waiting. */
         .pip-mini { display: none; position: relative; flex-direction: column; align-items: center; justify-content: center; gap: 9px; width: 100%; height: 100%; padding: 0; border: none; background: transparent; cursor: pointer; font-family: inherit; }
-        body.pip-collapsed .pip-head, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-inputrow { display: none; }
+        body.pip-collapsed .pip-head, body.pip-collapsed .pip-live, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-inputrow { display: none; }
         body.pip-collapsed .pip-mini { display: flex; }
         .pip-mini-stage { position: relative; width: 72px; height: 72px; }
         .pip-mini-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--cyan); opacity: 0; pointer-events: none; }
@@ -3108,6 +3114,29 @@
         @keyframes pipNewFlash { 0% { box-shadow: 0 0 0 3px rgba(3,114,255,0.5); } 100% { box-shadow: 0 0 0 3px rgba(3,114,255,0); } }
         .pip-msgs { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
         .pip-empty { margin: auto; max-width: 250px; text-align: center; color: #64748b; font-size: 12.5px; line-height: 1.6; }
+        /* Live listening band — mirrors the main tab's transcript strip:
+           streams the voice-to-text while hearing, then flips to a busy
+           "Processing/Researching" state once a question is identified. */
+        .pip-live { display: none; align-items: flex-start; gap: 10px; padding: 9px 14px; background: var(--quote); border-bottom: 1px solid var(--divider); flex-shrink: 0; }
+        .pip-live.show { display: flex; }
+        .pip-live-ind { display: inline-flex; align-items: center; height: 16px; margin-top: 1px; flex-shrink: 0; }
+        .pip-live-wave { display: inline-flex; align-items: flex-end; gap: 2px; height: 16px; }
+        .pip-live-wave i { width: 3px; height: 5px; background: var(--primary); border-radius: 2px; animation: pipWave 1s ease-in-out infinite; }
+        .pip-live-wave i:nth-child(2) { animation-delay: 0.15s; }
+        .pip-live-wave i:nth-child(3) { animation-delay: 0.3s; }
+        @keyframes pipWave { 0%, 100% { height: 4px; } 50% { height: 15px; } }
+        .pip-live-dots { display: none; gap: 3px; align-items: center; }
+        .pip-live-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); animation: pipDot 1.4s infinite ease-in-out both; }
+        .pip-live-dots i:nth-child(1) { animation-delay: -0.32s; }
+        .pip-live-dots i:nth-child(2) { animation-delay: -0.16s; }
+        .pip-live.busy .pip-live-wave { display: none; }
+        .pip-live.busy .pip-live-dots { display: inline-flex; }
+        .pip-live-body { min-width: 0; flex: 1; }
+        .pip-live-label { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--primary); line-height: 1.4; }
+        .pip-live-text { font-size: 12.5px; line-height: 1.45; color: var(--dark); margin-top: 2px; overflow-wrap: break-word; }
+        .pip-live-text:empty { display: none; }
+        .pip-live-caret { display: inline-block; margin-left: 1px; color: var(--primary); font-weight: 700; animation: pipCaret 1s steps(1) infinite; }
+        @keyframes pipCaret { 50% { opacity: 0; } }
         .pip-row { display: flex; justify-content: flex-start; }
         .pip-row.user { justify-content: flex-end; }
         .pip-bubble { max-width: 88%; padding: 8px 12px; border-radius: 12px; font-size: 13px; line-height: 1.5; overflow-wrap: break-word; white-space: pre-wrap; }
@@ -3144,7 +3173,7 @@
         .pip-send { width: 38px; height: 38px; border-radius: 50%; background: var(--primary); color: #fff; border: none; display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
         .pip-send:hover { background: var(--primary-hover); }
         .pip-send:disabled { background: #cbd5e1; cursor: not-allowed; }
-        @media (prefers-reduced-motion: reduce) { .pip-dot.live, .pip-mini-dot.live, .pip-mini.is-live .pip-mini-ring, .pip-mini.has-unseen .pip-mini-orb, .pip-mini-dots i, .pip-new, .pip-tdot { animation: none; } }
+        @media (prefers-reduced-motion: reduce) { .pip-dot.live, .pip-mini-dot.live, .pip-mini.is-live .pip-mini-ring, .pip-mini.has-unseen .pip-mini-orb, .pip-mini-dots i, .pip-new, .pip-tdot, .pip-live-wave i, .pip-live-dots i, .pip-live-caret { animation: none; } }
       `;
 
       // Toggle the floating window. Must run from a real user click —
@@ -3214,6 +3243,16 @@
             <button class="pip-min" data-action="pip-minimize" title="Minimize to a floating icon" aria-label="Minimize to a floating icon">
               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/></svg>
             </button>
+          </div>
+          <div class="pip-live" id="pip-live">
+            <span class="pip-live-ind" aria-hidden="true">
+              <span class="pip-live-wave"><i></i><i></i><i></i></span>
+              <span class="pip-live-dots"><i></i><i></i><i></i></span>
+            </span>
+            <div class="pip-live-body">
+              <div class="pip-live-label" id="pip-live-label">Listening for tech questions</div>
+              <div class="pip-live-text" id="pip-live-text"></div>
+            </div>
           </div>
           <div class="pip-msgs" id="pip-msgs"></div>
           <div class="pip-inputrow">
@@ -3463,6 +3502,62 @@
         if (PIP.flashNext) { PIP.flashNext = false; PIP.flashNow = true; }
       }
 
+      // Live listening band, mirroring the main tab's transcript strip:
+      // stream the voice-to-text while Randy hears speech, then flip to a
+      // busy "Processing/Researching" state the moment a question is being
+      // checked or answered. Hidden whenever Randy isn't actively listening,
+      // so typed-only use of the pop-out is unaffected.
+      function pipLiveModel(slot) {
+        if (!slot || !slot.listenOn) return { show: false };
+        const inConvo = VOICE.awaitingCommand || VOICE.conversationMode;
+        // Answering — the web search runs here. An overheard question is a
+        // technical-assist answer ("Researching"); a spoken one is a chat
+        // reply ("Thinking").
+        if (slot.loading) {
+          let lastUser = null;
+          for (let i = slot.messages.length - 1; i >= 0; i--) {
+            if (slot.messages[i].role === 'user') { lastUser = slot.messages[i]; break; }
+          }
+          const researching = lastUser && lastUser.kind === 'assist-q';
+          return { show: true, busy: true, label: researching ? 'Researching the question…' : 'Thinking…', text: '' };
+        }
+        // Classifier deciding whether the latest utterance is a question.
+        if (TECH.pending) return { show: true, busy: true, label: 'Processing question…', text: '' };
+        // Live transcription as it streams in.
+        if (VOICE.interimText) {
+          return { show: true, busy: false, label: inConvo ? 'Listening to you' : 'Hearing…', text: VOICE.interimText };
+        }
+        // Listening, nothing heard yet.
+        return { show: true, busy: false, label: inConvo ? 'Listening to you' : 'Listening for tech questions', text: '' };
+      }
+
+      // Push the live-band state into the pop-out document. Called from
+      // renderPip() (covers status changes) and directly from the interim
+      // transcript hooks (which bypass a full render for performance). Must
+      // never throw — the window can close between checks and DOM writes.
+      function updatePipLive(slot) {
+        const w = PIP.window;
+        if (!w || w.closed || PIP.collapsed) return;
+        try {
+          const doc = w.document;
+          const band = doc.getElementById('pip-live');
+          if (!band) return;
+          const m = pipLiveModel(slot || STATE.slots[PIP.slotIdx]);
+          band.classList.toggle('show', !!m.show);
+          band.classList.toggle('busy', !!(m.show && m.busy));
+          if (!m.show) return;
+          const lbl = doc.getElementById('pip-live-label');
+          if (lbl && lbl.textContent !== m.label) lbl.textContent = m.label;
+          const txt = doc.getElementById('pip-live-text');
+          if (txt) {
+            const html = m.text ? escHtml(m.text) + '<span class="pip-live-caret">▊</span>' : '';
+            if (txt.innerHTML !== html) txt.innerHTML = html;
+          }
+        } catch (err) {
+          // window vanished mid-write — harmless, next render reconciles.
+        }
+      }
+
       // Status line + listening dot, mirroring the conv-sub logic in
       // renderCard so the pop-out reflects the main tab's voice state.
       function pipStatus(slot) {
@@ -3479,6 +3574,9 @@
       function pipMessagesHtml(slot) {
         const msgs = slot.messages;
         if (msgs.length === 0 && !slot.loading) {
+          if (slot.listenOn) {
+            return '<div class="pip-empty">Listening to the call — technical questions get answered here as Randy hears them.</div>';
+          }
           return '<div class="pip-empty">No messages yet — say “Hey ' + escHtml(slot.voiceName || slot.label) + '” in the main tab or type below.</div>';
         }
         const out = msgs.map((m, mi) => {
@@ -3528,6 +3626,9 @@
           if (sub && sub.textContent !== st.text) sub.textContent = st.text;
           const dot = doc.getElementById('pip-dot');
           if (dot) dot.className = 'pip-dot' + (st.live ? ' live' : '');
+
+          // Live transcript / processing band.
+          updatePipLive(slot);
 
           // Collapsed icon: listening → answering → answer-ready.
           const mini = doc.getElementById('pip-mini');
