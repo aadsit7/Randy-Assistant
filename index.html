@@ -417,8 +417,8 @@
 
       // Technical-assist tuning.
       const ASSIST = {
-        DEBOUNCE_MS: 1400,        // silence gap before a buffered utterance is classified
-        DEBOUNCE_FAST_MS: 900,    // shorter gap when the buffer already looks like a full question
+        DEBOUNCE_MS: 1100,        // silence gap before a buffered utterance is classified
+        DEBOUNCE_FAST_MS: 650,    // shorter gap when the buffer already looks like a full question
         MIN_CHARS: 10,            // ignore fragments shorter than this
         MIN_WORDS: 3,             // ...or with fewer words than this
         CONF_THRESHOLD: 0.65,     // classifier confidence needed to auto-answer
@@ -427,13 +427,19 @@
         DECISIONS_KEEP: 8,        // ring buffer for the status UI
         MAX_BUFFER_CHARS: 420,    // cap the join buffer so run-on speech still flushes
         MAX_DEFERRALS: 4,         // holds while interim speech is still flowing
-        // Holds while a prior classify/answer is in flight. Answers with web
-        // search take 5-15s, so this budget (x 1500ms) must outlast them —
-        // otherwise a question asked while Randy is answering gets dropped.
-        BUSY_MAX_DEFERRALS: 20,
+        // Holds only while a CLASSIFY call is in flight (those are quick). A
+        // question overheard while Randy is busy ANSWERING is no longer held
+        // here — it is classified right away and the accepted answer is queued
+        // (see TECH.answerQueue), so a question asked mid-answer is never lost.
+        BUSY_MAX_DEFERRALS: 8,
+        // Accepted questions waiting their turn behind the one Randy is
+        // answering. Capped so a long monologue can't pile up stale questions;
+        // on a live call the freshest questions matter most, so the oldest is
+        // dropped first when the cap is hit.
+        MAX_QUEUE: 4,
         INTERIM_FRESH_MS: 1500,   // interim words newer than this mean speech is still flowing
         INTERIM_RECHECK_MS: 700,  // re-check cadence while waiting for a sentence to finish
-        SEARCH_MAX_USES: 2,       // web searches per answer (latency budget)
+        SEARCH_MAX_USES: 3,       // web searches per answer — grounding headroom (accuracy > a little latency)
         HISTORY_PAIRS: 2,         // prior assist Q&A pairs sent as context
         CONV_EXIT_MS: 20000       // follow-up window after a voice answer
       };
@@ -475,9 +481,11 @@
         'WRONG: "I’ll search the current docs to give you the accurate picture. Based on Recast’s documentation, Application Workspace is..."',
         'RIGHT: "Application Workspace is..."',
         '',
-        '# Accuracy Rules',
+        '# Accuracy Rules — your highest priority, above being helpful or persuasive',
         '- Only state facts you can verify. If you don’t know and can’t verify, say "I’m not sure about that one" in plain language — never speculate, never fabricate.',
         '- Never fabricate features, capabilities, statistics, or URLs.',
+        '- Never claim a product does something it doesn’t. If a capability isn’t there, say so plainly — "that’s not what Application Workspace does" — and point to the tool that actually handles it. A true expert is comfortable saying no; bluffing a feature into existence is the fastest way to lose a customer’s trust.',
+        '- When something is out of scope or missing, turn it into help: ask what they’re trying to accomplish, and offer a real alternative (Recast or otherwise) if one fits.',
         '- Never pad with generic filler or marketing language.',
         '- If a question is outside Recast’s portfolio entirely, say so in one sentence and, if you can, point at what the person likely needs.'
       ].join('\n');
@@ -495,7 +503,16 @@
       // Appended for auto-answered technical-assist questions.
       const ASSIST_STYLE = [
         '# Context',
-        'You are listening in on a live sales/technical call. A technical question was just asked. The questioner cannot reply to you, so never ask clarifying questions — if the question is ambiguous, answer the most likely interpretation and flag the assumption in one bullet.',
+        'You are listening in on a live sales/technical call. A technical question was just asked. Your answer is read live by a Recast engineer who will repeat it to the customer as fact.',
+        '',
+        '# Accuracy is the priority — this overrides every formatting and brevity rule below',
+        'A wrong detail spoken to a customer does more damage than a short or hedged answer. A real expert never bluffs.',
+        '- Assert a capability, setting, path, number, version, limit, or default ONLY when you are confident it is correct. If you cannot confirm a specific claim, do not state it — leave it out, or mark it plainly as an assumption in its own bullet.',
+        '- Never invent feature names, configuration steps, version numbers, limits, integrations, or statistics. "I can\'t confirm the exact number" is a better bullet than a fabricated one.',
+        '- NEVER claim a product can do something it cannot. If the asked-for capability is not part of the product, say so directly — e.g. "That\'s not something Application Workspace does; that\'s handled by [the actual tool/product]." It is completely fine to say no.',
+        '- When a capability is missing, be useful about it: name what actually does the job (Recast or otherwise), and/or pose one question the engineer can put back to the customer to uncover what they\'re really trying to accomplish, so an alternative can be offered. This is the one case where a question in your reply is welcome.',
+        '- If the core of the question can\'t be answered with confidence, say so in the Bottom line ("Likely yes, but confirm X for your build") instead of guessing.',
+        '- Otherwise, since the customer is not reading your reply, do not ask clarifying questions just to narrow scope — answer the most likely interpretation and flag the assumption in one bullet.',
         '',
         '# Response Format — follow exactly',
         '1. The very first characters of your reply must be **Bottom line:** followed by a one-sentence direct answer. Nothing comes before it — no greeting, no preamble, no humor or false starts, no commentary about the question or about yourself.',
@@ -772,6 +789,7 @@
         lastSubmittedAt: 0,
         decisions: [],            // ring buffer {text, accepted, confidence, topic, ts}
         recentPairs: [],          // last assist Q&As — API context that survives chat archiving
+        answerQueue: [],          // accepted questions waiting behind the one being answered
         heard: 0,
         answered: 0
       };
@@ -2044,6 +2062,7 @@
         TECH.buffer = '';
         TECH.deferrals = 0;
         TECH.busyDeferrals = 0;
+        TECH.answerQueue = [];
         if (TECH.bufferTimerId) { clearTimeout(TECH.bufferTimerId); TECH.bufferTimerId = null; }
       }
 
@@ -2078,17 +2097,22 @@
           return;
         }
 
-        // Busy with a previous classify/answer — hold the question until
-        // Randy frees up. The budget is generous on purpose: dropping here
-        // means a question asked during an answer silently vanishes, which
-        // reads as "Randy didn't hear me". MAX_BUFFER_CHARS keeps the held
-        // buffer from growing unboundedly while we wait.
-        if (TECH.pending || slot.loading) {
+        // A classify call is already in flight — hold briefly so we don't
+        // stack two classifications or classify this buffer mid-flight. An
+        // answer being IN PROGRESS no longer blocks us: the question is
+        // classified right now and, if accepted, queued behind the current
+        // answer (runAssistAnswer drains TECH.answerQueue), so a question
+        // asked while Randy is talking is never silently lost.
+        if (TECH.pending) {
           if (TECH.busyDeferrals < ASSIST.BUSY_MAX_DEFERRALS) {
             TECH.busyDeferrals++;
             TECH.bufferTimerId = setTimeout(flushAssistBuffer, 1500);
           } else {
-            clearAssistBuffer();
+            // Give up waiting on a wedged classify, but keep any queued
+            // answers intact (don't call clearAssistBuffer — it wipes them).
+            TECH.buffer = '';
+            TECH.deferrals = 0;
+            TECH.busyDeferrals = 0;
           }
           return;
         }
@@ -2410,7 +2434,18 @@
 
       async function runAssistAnswer(idx, question) {
         const slot = STATE.slots[idx];
-        if (slot.loading) return;
+        // Randy is already answering — don't drop this question, queue it so
+        // it's answered the moment the current one finishes. On a live call
+        // the freshest questions matter most, so when the queue is full the
+        // OLDEST waiting question is dropped, never this newly-spotted one.
+        if (slot.loading) {
+          if (!TECH.answerQueue.some(q => fuzzyEqual(q, question))) {
+            TECH.answerQueue.push(question);
+            while (TECH.answerQueue.length > ASSIST.MAX_QUEUE) TECH.answerQueue.shift();
+            renderAssistStatus();
+          }
+          return;
+        }
         slot.loading = true;
 
         // Every auto-answered question starts a visually fresh chat: the
@@ -2521,6 +2556,13 @@
         }
         render();
         scrollChat();
+
+        // Drain the next queued question, if any. A tick later so this
+        // answer's archive/render settles and slot.loading reads false.
+        if (TECH.answerQueue.length && !slot.loading) {
+          const next = TECH.answerQueue.shift();
+          setTimeout(() => runAssistAnswer(idx, next), 0);
+        }
       }
 
       function scrollChat() {
