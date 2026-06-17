@@ -3330,7 +3330,7 @@
            listening, white dots while answering, badge + glow when an
            answer is waiting. */
         .pip-mini { display: none; position: relative; flex-direction: column; align-items: center; justify-content: center; gap: 9px; width: 100%; height: 100%; padding: 0; border: none; background: transparent; cursor: pointer; font-family: inherit; }
-        body.pip-collapsed .pip-head, body.pip-collapsed .pip-live, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-toolbar, body.pip-collapsed .pip-inputrow { display: none; }
+        body.pip-collapsed .pip-head, body.pip-collapsed .pip-live, body.pip-collapsed .pip-msgs, body.pip-collapsed .pip-toolbar, body.pip-collapsed .pip-newchat-row, body.pip-collapsed .pip-inputrow { display: none; }
         body.pip-collapsed .pip-mini { display: flex; }
         .pip-mini-stage { position: relative; width: 72px; height: 72px; }
         .pip-mini-ring { position: absolute; inset: 0; border-radius: 50%; border: 2px solid var(--cyan); opacity: 0; pointer-events: none; }
@@ -3424,6 +3424,10 @@
         .pip-switch.on { background: var(--primary); }
         .pip-switch::after { content: ''; position: absolute; top: 2px; left: 2px; width: 17px; height: 17px; border-radius: 50%; background: #fff; transition: left 0.2s; box-shadow: 0 1px 3px rgba(22,31,91,0.25); }
         .pip-switch.on::after { left: 19px; }
+        .pip-newchat-row { display: flex; padding: 0 12px 9px; background: #fff; flex-shrink: 0; }
+        .pip-newchat { display: inline-flex; align-items: center; justify-content: center; gap: 7px; width: 100%; padding: 8px 12px; font-size: 12px; font-weight: 600; color: var(--navy); background: #fff; border: 1.5px solid var(--divider); border-radius: 9px; cursor: pointer; font-family: inherit; transition: border-color 0.15s, color 0.15s, background 0.15s; }
+        .pip-newchat:hover { border-color: var(--primary); color: var(--primary); background: #F5F9FF; }
+        .pip-newchat svg { width: 15px; height: 15px; flex-shrink: 0; }
         .pip-inputrow { display: flex; gap: 8px; align-items: center; padding: 10px; border-top: 1px solid var(--divider); background: #fff; flex-shrink: 0; }
         .pip-inputrow input { flex: 1; min-width: 0; border: 1.5px solid var(--divider); border-radius: 9999px; padding: 9px 14px; font-size: 13px; outline: none; color: var(--navy); font-family: inherit; }
         .pip-inputrow input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px rgba(0,191,255,0.16); }
@@ -3520,6 +3524,12 @@
             </label>
             <span class="pip-switch" id="pip-switch" role="switch" aria-checked="false" aria-label="Read answers aloud" tabindex="0" data-action="pip-toggle-speak"></span>
           </div>
+          <div class="pip-newchat-row">
+            <button class="pip-newchat" id="pip-newchat" data-action="pip-new-chat" title="Start a new chat — the current one is saved in History">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>
+              <span>New chat</span>
+            </button>
+          </div>
           <div class="pip-inputrow">
             <input type="text" id="pip-input" placeholder="Message ${escAttr(label)}…" autocomplete="off" />
             <button class="pip-send" id="pip-send" data-action="pip-send" title="Send message" aria-label="Send message">
@@ -3547,6 +3557,7 @@
           if (e.target.closest('[data-action="pip-minimize"]')) { collapsePip(); return; }
           if (e.target.closest('[data-action="pip-expand"]')) { expandPip(); return; }
           if (e.target.closest('[data-action="pip-toggle-speak"]')) { toggleSpeakFromPip(); return; }
+          if (e.target.closest('[data-action="pip-new-chat"]')) { newChat(); return; }
           const cp = e.target.closest('[data-action="pip-copy"]');
           if (cp) copyFromPip(cp);
         });
