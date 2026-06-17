@@ -779,6 +779,7 @@
         bufferTimerId: null,
         deferrals: 0,
         pending: false,           // classifier call in flight
+        activeText: '',           // utterance currently being analyzed/answered (for the live band)
         questionQueue: [],        // FIFO of questions overheard while Randy was busy
         context: [],              // recent utterances for the classifier
         lastSubmitted: '',
@@ -2328,6 +2329,7 @@
         }
 
         TECH.pending = true;
+        TECH.activeText = corrected;   // surfaced in the live "Analyzing question" band
         renderAssistStatus();
         classifyUtterance(corrected, TECH.context.slice(0, -1))
           .then(decision => {
@@ -3371,12 +3373,26 @@
         .pip-live-dots i { width: 6px; height: 6px; border-radius: 50%; background: var(--primary); animation: pipDot 1.4s infinite ease-in-out both; }
         .pip-live-dots i:nth-child(1) { animation-delay: -0.32s; }
         .pip-live-dots i:nth-child(2) { animation-delay: -0.16s; }
-        .pip-live.busy .pip-live-wave { display: none; }
-        .pip-live.busy .pip-live-dots { display: inline-flex; }
+        /* Stage swap: a sound-wave while listening, bouncing dots while Randy
+           analyzes the question and researches the support site. */
+        .pip-live.stage-analyzing .pip-live-wave,
+        .pip-live.stage-researching .pip-live-wave { display: none; }
+        .pip-live.stage-analyzing .pip-live-dots,
+        .pip-live.stage-researching .pip-live-dots { display: inline-flex; }
         .pip-live-body { min-width: 0; flex: 1; }
-        .pip-live-label { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--primary); line-height: 1.4; }
+        .pip-live-label { font-size: 10px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase; color: var(--primary); line-height: 1.4; transition: color 0.2s; }
         .pip-live-text { font-size: 12.5px; line-height: 1.45; color: var(--dark); margin-top: 2px; overflow-wrap: break-word; }
         .pip-live-text:empty { display: none; }
+        /* Per-stage accent — colour the band, indicator and label together so
+           each step reads at a glance. Analyzing = amber, Researching = green. */
+        .pip-live.stage-analyzing { background: #FFFBEB; border-bottom-color: #FDE68A; }
+        .pip-live.stage-analyzing .pip-live-label { color: #B45309; }
+        .pip-live.stage-analyzing .pip-live-dots i { background: #D97706; }
+        .pip-live.stage-analyzing .pip-live-text { color: #92400E; }
+        .pip-live.stage-researching { background: #ECFDF5; border-bottom-color: #A7F3D0; }
+        .pip-live.stage-researching .pip-live-label { color: #047857; }
+        .pip-live.stage-researching .pip-live-dots i { background: #059669; }
+        .pip-live.stage-researching .pip-live-text { color: #065F46; }
         .pip-live-caret { display: inline-block; margin-left: 1px; color: var(--primary); font-weight: 700; animation: pipCaret 1s steps(1) infinite; }
         @keyframes pipCaret { 50% { opacity: 0; } }
         .pip-row { display: flex; justify-content: flex-start; }
@@ -3511,7 +3527,7 @@
               <span class="pip-live-dots"><i></i><i></i><i></i></span>
             </span>
             <div class="pip-live-body">
-              <div class="pip-live-label" id="pip-live-label">Listening for tech questions</div>
+              <div class="pip-live-label" id="pip-live-label">Listening for technical questions</div>
               <div class="pip-live-text" id="pip-live-text"></div>
             </div>
           </div>
@@ -3801,27 +3817,33 @@
       // busy "Processing/Researching" state the moment a question is being
       // checked or answered. Hidden whenever Randy isn't actively listening,
       // so typed-only use of the pop-out is unaffected.
+      // The live band walks the question through three stages so the user can
+      // watch Randy work: (1) listening — the voice-to-text streams in;
+      // (2) analyzing — the classifier is deciding if it's a tech question;
+      // (3) researching — the support-site web search is running for the answer.
       function pipLiveModel(slot) {
         if (!slot || !slot.listenOn) return { show: false };
-        // Answering — the web search runs here. An overheard question is a
-        // technical-assist answer ("Researching"); a spoken one is a chat
-        // reply ("Thinking").
+        // Stage 3 — answering. The web search runs here. An overheard question
+        // is a technical-assist answer ("Researching support site"); a spoken
+        // one is an ordinary chat reply ("Thinking").
         if (slot.loading) {
           let lastUser = null;
           for (let i = slot.messages.length - 1; i >= 0; i--) {
             if (slot.messages[i].role === 'user') { lastUser = slot.messages[i]; break; }
           }
           const researching = lastUser && lastUser.kind === 'assist-q';
-          return { show: true, busy: true, label: researching ? 'Researching the question…' : 'Thinking…', text: '' };
+          if (researching) {
+            return { show: true, stage: 'researching', label: 'Researching support site', text: lastUser ? lastUser.content : '' };
+          }
+          return { show: true, stage: 'researching', label: 'Thinking…', text: '' };
         }
-        // Classifier deciding whether the latest utterance is a question.
-        if (TECH.pending) return { show: true, busy: true, label: 'Processing question…', text: '' };
-        // Live transcription as it streams in.
-        if (VOICE.interimText) {
-          return { show: true, busy: false, label: 'Hearing…', text: VOICE.interimText };
+        // Stage 2 — the classifier is deciding whether the utterance is a
+        // technical question worth answering.
+        if (TECH.pending) {
+          return { show: true, stage: 'analyzing', label: 'Analyzing question', text: TECH.activeText || VOICE.interimText || '' };
         }
-        // Listening, nothing heard yet.
-        return { show: true, busy: false, label: 'Listening for tech questions', text: '' };
+        // Stage 1 — live transcription as Randy hears the call.
+        return { show: true, stage: 'listening', label: 'Listening for technical questions', text: VOICE.interimText || '' };
       }
 
       // Push the live-band state into the pop-out document. Called from
@@ -3837,13 +3859,18 @@
           if (!band) return;
           const m = pipLiveModel(slot || STATE.slots[PIP.slotIdx]);
           band.classList.toggle('show', !!m.show);
-          band.classList.toggle('busy', !!(m.show && m.busy));
+          band.classList.toggle('stage-listening', m.stage === 'listening');
+          band.classList.toggle('stage-analyzing', m.stage === 'analyzing');
+          band.classList.toggle('stage-researching', m.stage === 'researching');
           if (!m.show) return;
           const lbl = doc.getElementById('pip-live-label');
           if (lbl && lbl.textContent !== m.label) lbl.textContent = m.label;
           const txt = doc.getElementById('pip-live-text');
           if (txt) {
-            const html = m.text ? escHtml(m.text) + '<span class="pip-live-caret">▊</span>' : '';
+            // Only the live-transcription stage gets the blinking caret; the
+            // analyzing/researching text is the settled question, shown plainly.
+            const caret = m.stage === 'listening' ? '<span class="pip-live-caret">▊</span>' : '';
+            const html = m.text ? escHtml(m.text) + caret : '';
             if (txt.innerHTML !== html) txt.innerHTML = html;
           }
         } catch (err) {
@@ -3857,7 +3884,7 @@
         const on = !!slot.listenOn;
         if (slot.isSpeaking) return { text: 'Talking…', live: true };
         if (slot.loading) return { text: 'Thinking…', live: on };
-        if (on) return { text: 'Listening for tech questions', live: true };
+        if (on) return { text: 'Listening for technical questions', live: true };
         return { text: 'Online', live: false };
       }
 
