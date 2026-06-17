@@ -348,12 +348,16 @@
       .voice-toast { position: fixed; bottom: 92px; left: 50%; transform: translateX(-50%); z-index: 100; background: var(--navy-deep); color: #fff; padding: 11px 18px; border-radius: 12px; font-size: 13px; font-weight: 500; box-shadow: 0 20px 48px rgba(22,31,91,0.30); pointer-events: none; animation: toastIn 0.25s ease-out; max-width: min(92vw, 480px); text-align: center; }
       @keyframes toastIn { from { opacity: 0; transform: translate(-50%, 12px); } to { opacity: 1; transform: translate(-50%, 0); } }
 
+      /* Visually hidden but available to screen readers (live region). */
+      .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
       /* ===== Audio-mode chooser ("How should Randy listen?") ===== */
       .ac-scrim, .ac-scrim * { box-sizing: border-box; }
       .ac-scrim { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 20px; background: rgba(22,31,91,0.42); backdrop-filter: blur(2px); animation: acFade 0.18s ease-out; }
       @keyframes acFade { from { opacity: 0; } to { opacity: 1; } }
       .ac-modal { position: relative; width: min(440px, 100%); background: #fff; border-radius: var(--radius); box-shadow: 0 24px 64px rgba(22,31,91,0.34); padding: 26px 24px 22px; animation: acPop 0.22s var(--ease); }
       @keyframes acPop { from { opacity: 0; transform: translateY(10px) scale(0.985); } to { opacity: 1; transform: translateY(0) scale(1); } }
+      .ac-modal:focus { outline: none; }
       .ac-x { position: absolute; top: 13px; right: 13px; width: 32px; height: 32px; display: grid; place-items: center; border: none; background: transparent; color: var(--n500); border-radius: 8px; cursor: pointer; transition: background 0.12s, color 0.12s; }
       .ac-x:hover { background: var(--n100); color: var(--navy-deep); }
       .ac-title { font-size: 18px; font-weight: 700; color: var(--navy-deep); letter-spacing: -0.01em; padding-right: 28px; }
@@ -1927,7 +1931,32 @@
         openAudioChooser();
       }
 
-      // Open the "How should Randy listen?" slider. Pre-selects the last mode.
+      // render() rebuilds #app wholesale, so focus has to be reapplied once the
+      // new DOM exists (mirrors the composer-focus pattern elsewhere).
+      function focusAfterRender(sel) {
+        setTimeout(() => { try { document.querySelector(sel)?.focus(); } catch {} }, 40);
+      }
+
+      // One polite live region kept OUTSIDE #app (so render() never wipes it)
+      // lets screen readers hear the selected mode and its description as the
+      // slider moves — the full-rebuild render can't announce in place.
+      function announceLive(msg) {
+        let el = document.getElementById('randy-live');
+        if (!el) {
+          el = document.createElement('div');
+          el.id = 'randy-live';
+          el.className = 'sr-only';
+          el.setAttribute('aria-live', 'polite');
+          el.setAttribute('aria-atomic', 'true');
+          document.body.appendChild(el);
+        }
+        // Clear first so re-selecting the same value still re-announces.
+        el.textContent = '';
+        setTimeout(() => { el.textContent = msg; }, 30);
+      }
+
+      // Open the "How should Randy listen?" slider. Pre-selects the last mode
+      // and moves focus into the dialog for keyboard / screen-reader users.
       function openAudioChooser() {
         const slot = STATE.slots[0];
         if (!VOICE.srSupported) { showToast('Randy needs Chrome or Edge to listen'); return; }
@@ -1935,6 +1964,16 @@
         if (slot.audioMode !== 'one-way' && slot.audioMode !== 'two-way') slot.audioMode = 'two-way';
         STATE.audioChooserOpen = true;
         render();
+        focusAfterRender('.ac-modal');
+      }
+
+      // Close the chooser without starting (X / backdrop / Escape) and return
+      // focus to the voice control that opened it.
+      function closeAudioChooser() {
+        if (!STATE.audioChooserOpen) return;
+        STATE.audioChooserOpen = false;
+        render();
+        focusAfterRender('.vp');
       }
 
       async function startListening(mode) {
@@ -3435,6 +3474,14 @@
           </div>`;
       }
 
+      // Single source of truth for the chooser's per-mode copy, reused by the
+      // rendered card and the screen-reader announcement so they never drift.
+      function audioModeInfo(mode) {
+        return mode === 'one-way'
+          ? { label: 'One-way audio', icon: 'mic', sub: 'Microphone only', line: "This will only pick up what you're saying and not what anyone else is saying." }
+          : { label: 'Two-way audio', icon: 'volume-2', sub: 'Microphone + computer audio', line: 'This will pick up your audio and whatever audio is on your computer.' };
+      }
+
       // "How should Randy listen?" — shown after the user asks to turn Randy
       // on (see toggleListening → openAudioChooser). The slider picks the
       // capture mode; the confirm button's click is the user gesture that
@@ -3442,12 +3489,10 @@
       function renderAudioChooser() {
         if (!STATE.audioChooserOpen) return '';
         const oneWay = STATE.slots[0].audioMode === 'one-way';
-        const desc = oneWay
-          ? { icon: 'mic', sub: 'Microphone only', line: "This will only pick up what you're saying and not what anyone else is saying." }
-          : { icon: 'volume-2', sub: 'Microphone + computer audio', line: 'This will pick up your audio and whatever audio is on your computer.' };
+        const desc = audioModeInfo(oneWay ? 'one-way' : 'two-way');
         return `
           <div class="ac-scrim" data-action="close-audio-chooser-bg">
-            <div class="ac-modal" role="dialog" aria-modal="true" aria-label="How should Randy listen?">
+            <div class="ac-modal" role="dialog" aria-modal="true" aria-label="How should Randy listen?" aria-describedby="ac-desc-text" tabindex="-1">
               <button class="ac-x" data-action="close-audio-chooser" title="Cancel" aria-label="Cancel"><i data-lucide="x" class="w-4 h-4"></i></button>
               <div class="ac-title">How should Randy listen?</div>
               <p class="ac-sub">Choose how Randy captures audio while he's on.</p>
@@ -3458,7 +3503,7 @@
               </div>
               <div class="ac-desc">
                 <div class="ac-desc-ic"><i data-lucide="${desc.icon}" class="w-5 h-5"></i></div>
-                <div class="ac-desc-body">
+                <div class="ac-desc-body" id="ac-desc-text">
                   <div class="ac-desc-sub">${desc.sub}</div>
                   <p class="ac-desc-line">${desc.line}</p>
                 </div>
@@ -4386,8 +4431,13 @@
             }
             case 'toggle-listen': toggleListening(); break;
             case 'set-audio-mode': {
-              STATE.slots[0].audioMode = act.dataset.mode === 'one-way' ? 'one-way' : 'two-way';
+              const m = act.dataset.mode === 'one-way' ? 'one-way' : 'two-way';
+              STATE.slots[0].audioMode = m;
               render();
+              // Keep keyboard focus on the slider, and announce the new choice.
+              focusAfterRender('.ac-seg-opt[data-mode="' + m + '"]');
+              const info = audioModeInfo(m);
+              announceLive(info.label + '. ' + info.sub + '. ' + info.line);
               break;
             }
             case 'confirm-audio-mode': {
@@ -4405,8 +4455,7 @@
               // Background only closes on a direct click (mirrors the history
               // popout): a click on the modal's own content has no data-action.
               if (action === 'close-audio-chooser-bg' && !e.target.hasAttribute('data-action')) break;
-              STATE.audioChooserOpen = false;
-              render();
+              closeAudioChooser();
               break;
             }
             case 'new-chat': HISTORY_VIEW.open = null; STATE.activeTab = 'home'; newChat(); break;
@@ -4608,8 +4657,7 @@
             return;
           }
           if (e.key === 'Escape' && STATE.audioChooserOpen) {
-            STATE.audioChooserOpen = false;
-            render();
+            closeAudioChooser();
             return;
           }
           if (e.key === 'Escape' && e.target.id === 'history-search') {
