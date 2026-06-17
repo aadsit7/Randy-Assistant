@@ -440,7 +440,19 @@
         INTERIM_FRESH_MS: 1500,   // interim words newer than this mean speech is still flowing
         INTERIM_RECHECK_MS: 700,  // re-check cadence while waiting for a sentence to finish
         SEARCH_MAX_USES: 2,       // web searches per answer (latency budget)
-        HISTORY_PAIRS: 2          // prior assist Q&A pairs sent as context
+        HISTORY_PAIRS: 2,         // prior assist Q&A pairs sent as context
+        // Reliability ceilings — the #1 guarantee of this tool. A question
+        // Randy hears must ALWAYS reach an answer; a hung network call must
+        // never leave the pipeline frozen on "Analyzing"/"Researching" (the
+        // classic "Randy heard it but never answered"). Every stage is bounded
+        // so it always settles, and a self-healing watchdog un-sticks anything
+        // that slips through. Wedge limits sit ABOVE the matching timeout so the
+        // in-call timeout fires first and the watchdog is only ever a backstop.
+        CLASSIFY_TIMEOUT_MS: 15000,  // hard ceiling on the classifier round-trip
+        ANSWER_TIMEOUT_MS: 45000,    // hard ceiling on one research+answer call
+        WATCHDOG_MS: 4000,           // how often the self-healing watchdog checks
+        PENDING_WEDGE_MS: 22000,     // pending longer than this ⇒ classifier wedged
+        ANSWER_WEDGE_MS: 105000      // loading longer than this ⇒ answer wedged
       };
 
       /* ================================================================
@@ -773,6 +785,11 @@
         bufferTimerId: null,
         deferrals: 0,
         pending: false,           // classifier call in flight
+        pendingSince: 0,          // when the classifier gate started (wedge detection)
+        answerSince: 0,           // when the current overheard answer started (wedge detection)
+        classifyController: null, // aborts a wedged classifier round-trip
+        classifyGen: 0,           // epoch — a stale classify resolution is ignored
+        watchdogId: null,         // self-healing pipeline watchdog interval
         activeText: '',           // utterance currently being analyzed/answered (for the live band)
         questionQueue: [],        // FIFO of questions overheard while Randy was busy
         context: [],              // recent utterances for the classifier
@@ -1692,6 +1709,10 @@
         if (VOICE.wantRunning && recognitionWanted() && !VOICE.ttsPaused && !VOICE.srRunning) {
           try { startRecognitionNow(); } catch {}
         }
+        // Also a free chance to un-stick a pipeline that wedged while the tab
+        // was throttled in the background, so a heard question isn't left
+        // frozen on "Analyzing"/"Researching" after the user returns.
+        if (listeningOn()) { try { assistWatchdogTick(); } catch {} }
       });
 
       // Force a clean recognizer restart. abort() triggers onend, which
@@ -1926,6 +1947,7 @@
         TECH.answered = 0;
         TECH.decisions = [];
         startRecognition();
+        startAssistWatchdog();
         // Warn right away if the answer service is unreachable, so "hears
         // but never answers" can't happen silently.
         loadRemoteConfig().then(() => {
@@ -1945,7 +1967,14 @@
           VOICE.micStream = null;
         }
         clearAssistBuffer();
+        stopAssistWatchdog();
+        // Cancel any in-flight classifier round-trip and bump the epoch so a
+        // late resolution after teardown is ignored.
+        TECH.classifyGen++;
+        if (TECH.classifyController) { try { TECH.classifyController.abort(); } catch {} TECH.classifyController = null; }
         TECH.pending = false;
+        TECH.pendingSince = 0;
+        TECH.answerSince = 0;
         abortActiveReply();   // aborts in-flight replies and any TTS
         stopRecognition();
         stopDesktopCapture();
@@ -2072,13 +2101,18 @@
           DESKTOP.worker = new Worker(DESKTOP.workerUrl, { type: 'module' });
           DESKTOP.modelLoading = true;
           DESKTOP.worker.onmessage = onWhisperMessage;
-          DESKTOP.worker.onerror = () => {
-            setDesktopStatus('Computer audio: transcriber failed to load');
-            showToast('Live transcription model failed to load — check your connection.');
+          DESKTOP.worker.onerror = (e) => {
+            // Same graceful, silent fallback as the worker 'error' message:
+            // the mic path still works, so don't show an alarming banner/toast.
+            console.warn('desktop transcriber failed to load — using mic only:', (e && e.message) || '');
+            setDesktopStatus('');
           };
           DESKTOP.worker.postMessage({ type: 'init' });
         } catch (err) {
-          showToast('This browser can’t run the in-page transcriber. Using mic only.');
+          // Browser can't spin up the module worker — Randy stays on the mic.
+          // Silent fallback, no confusing notification.
+          console.warn('in-page transcriber unavailable — using mic only:', (err && err.message) || err);
+          setDesktopStatus('');
         }
       }
 
@@ -2093,8 +2127,13 @@
         }
         if (d.type === 'error') {
           DESKTOP.modelLoading = false;
-          setDesktopStatus('Computer audio: transcriber unavailable');
-          showToast('Live transcription couldn’t start on this device. Using mic only.');
+          // The in-browser transcriber couldn't start (WebGPU/WASM/model load).
+          // Randy keeps working on the microphone, so this is not something the
+          // user needs to see or act on — surfacing "transcriber unavailable"
+          // only confuses people. Fall back to mic-only silently; the detail is
+          // left in the console for debugging.
+          console.warn('desktop transcriber unavailable — using mic only:', d.error || '');
+          setDesktopStatus('');
           return;
         }
         if (d.type === 'result') {
@@ -2283,6 +2322,62 @@
         processAssistCandidate(next);
       }
 
+      // Self-healing watchdog — the backstop behind the per-call timeouts, and
+      // the reason a heard question can NEVER leave Randy frozen on "Analyzing"
+      // or "Researching." It mirrors the recognizer's startRecognitionWatchdog:
+      // every few seconds it looks for a stage that has been busy far longer
+      // than its own timeout should ever allow and un-sticks it. The mic stream
+      // held by startListening keeps this interval firing even in a background
+      // tab. In normal operation it never acts — the per-call timeouts settle
+      // everything first; this only earns its keep if something slips past them.
+      function startAssistWatchdog() {
+        if (TECH.watchdogId) return;
+        TECH.watchdogId = setInterval(assistWatchdogTick, ASSIST.WATCHDOG_MS);
+      }
+
+      function stopAssistWatchdog() {
+        if (TECH.watchdogId) { clearInterval(TECH.watchdogId); TECH.watchdogId = null; }
+      }
+
+      function assistWatchdogTick() {
+        const slot = STATE.slots[0];
+        if (!slot || !slot.listenOn) return;
+        const now = Date.now();
+
+        // Classifier wedged: the gate has shown "Analyzing" far longer than the
+        // classify timeout permits. Bump the epoch so the original promise
+        // can't double-fire if it ever wakes, abort the round-trip, and recover
+        // through the shared fallback so an obvious question still gets answered.
+        if (TECH.pending && TECH.pendingSince && now - TECH.pendingSince > ASSIST.PENDING_WEDGE_MS) {
+          console.warn('assist watchdog: classifier wedged — recovering');
+          TECH.classifyGen++;
+          if (TECH.classifyController) { try { TECH.classifyController.abort(); } catch {} }
+          TECH.classifyController = null;
+          TECH.pending = false;
+          TECH.pendingSince = 0;
+          const stuck = TECH.activeText || '';
+          if (stuck && !slot.loading) assistFallbackDecision(stuck);
+          else { renderAssistStatus(); drainQuestionQueue(); }
+          return;
+        }
+
+        // Answer wedged: "Researching" has been up longer than even a retrying
+        // answer could take. Abort the in-flight fetch — runAssistAnswer's own
+        // catch then frees the slot and drains the queue. If the controller is
+        // somehow gone, free the slot directly so the queue can never stall.
+        if (slot.loading && TECH.answerSince && now - TECH.answerSince > ASSIST.ANSWER_WEDGE_MS) {
+          console.warn('assist watchdog: answer wedged — recovering');
+          if (slot.abortController) {
+            try { slot.abortController.abort(); } catch {}
+          } else {
+            slot.loading = false;
+            TECH.answerSince = 0;
+            render();
+            drainQuestionQueue();
+          }
+        }
+      }
+
       // Classify (or fast-path) a finalized candidate and answer it when it
       // clears the gate. Non-answering paths drain the next queued question so
       // a skip never strands the rest of the queue.
@@ -2323,11 +2418,27 @@
         }
 
         TECH.pending = true;
+        TECH.pendingSince = Date.now();
         TECH.activeText = corrected;   // surfaced in the live "Analyzing question" band
+        // New classify cycle. The epoch lets a late resolution be ignored if
+        // the watchdog already gave up on this one and recovered the pipeline,
+        // so a question can never be answered twice. The controller lets the
+        // watchdog abort a wedged round-trip.
+        const gen = ++TECH.classifyGen;
+        const classifyCtl = new AbortController();
+        TECH.classifyController = classifyCtl;
         renderAssistStatus();
-        classifyUtterance(corrected, TECH.context.slice(0, -1))
+        classifyUtterance(corrected, TECH.context.slice(0, -1), classifyCtl.signal)
           .then(decision => {
+            if (gen !== TECH.classifyGen) return;   // superseded by the watchdog — ignore
             TECH.pending = false;
+            TECH.pendingSince = 0;
+            TECH.classifyController = null;
+            // The reply came back but we couldn't read a verdict from it (proxy
+            // didn't forward structured output, or returned prose/empty). Don't
+            // drop an obvious technical question over a format glitch — fall
+            // back to answering, the same net the network-error path uses.
+            if (decision.parsed === false) { assistFallbackDecision(corrected); return; }
             const conf = typeof decision.confidence === 'number' ? decision.confidence : 0;
             const accepted =
               decision.needs_answer === true &&
@@ -2350,22 +2461,35 @@
             runAssistAnswer(0, toAnswer);
           })
           .catch(err => {
+            if (gen !== TECH.classifyGen) return;   // superseded by the watchdog — ignore
             TECH.pending = false;
+            TECH.pendingSince = 0;
+            TECH.classifyController = null;
             console.error('classifier failed:', err);
             toastPipelineError("Randy couldn't check a question", err);
-            // Keep the SE alive: obvious technical questions are answered
-            // even when the classifier service is down.
-            if (looksLikeTechQuestion(corrected)) {
-              recordAssistDecision(corrected, true, 0.7, 'fallback match');
-              TECH.lastSubmitted = corrected;
-              TECH.lastSubmittedAt = Date.now();
-              runAssistAnswer(0, corrected);
-            } else {
-              recordAssistDecision(corrected, false, 0, 'check failed');
-              renderAssistStatus();
-              drainQuestionQueue();
-            }
+            // Keep the SE alive: obvious technical questions are answered even
+            // when the classifier times out or its service is unreachable.
+            assistFallbackDecision(corrected);
           });
+      }
+
+      // Classifier unusable — it timed out, its service is down, or the reply
+      // couldn't be read as a verdict. Keep the SE alive instead of dropping
+      // the utterance: an obvious technical question still gets answered, and
+      // anything else is logged so the queue moves on. Shared by the
+      // parse-failure, network-error, and watchdog paths so a dead or garbled
+      // gate can never strand a question Randy already heard.
+      function assistFallbackDecision(text) {
+        if (looksLikeTechQuestion(text)) {
+          recordAssistDecision(text, true, 0.7, 'fallback match');
+          TECH.lastSubmitted = text;
+          TECH.lastSubmittedAt = Date.now();
+          runAssistAnswer(0, text);
+        } else {
+          recordAssistDecision(text, false, 0, 'check unavailable');
+          renderAssistStatus();
+          drainQuestionQueue();
+        }
       }
 
       function pushAssistContext(text) {
@@ -2399,8 +2523,8 @@
         if (!isComposerFocused()) render();
       }
 
-      async function classifyUtterance(text, contextArr) {
-        if (!GSHEET_WEBHOOK) return { needs_answer: false, confidence: 0 };
+      async function classifyUtterance(text, contextArr, signal) {
+        if (!GSHEET_WEBHOOK) return { needs_answer: false, confidence: 0, parsed: true };
         const ctxLines = (contextArr || []).map((u, i) => (i + 1) + '. ' + u).join('\n');
         const userContent =
           (ctxLines ? 'Recent context (older first):\n' + ctxLines + '\n\n' : '') +
@@ -2412,7 +2536,7 @@
           messages: [{ role: 'user', content: userContent }],
           output_config: { format: { type: 'json_schema', schema: CLASSIFIER_SCHEMA } },
           save: false // keep classifier churn out of the history sheet
-        });
+        }, signal, ASSIST.CLASSIFY_TIMEOUT_MS);
         return parseClassifierReply(String(data.reply || ''));
       }
 
@@ -2420,9 +2544,13 @@
       // (older proxy deployments may not forward output_config). Stays
       // backward-compatible with the old schema: a reply that only carries the
       // legacy is_question field still produces a usable needs_answer verdict.
+      // parsed:false flags a reply we could not read as a verdict (no JSON, or
+      // JSON that didn't parse) — distinct from a genuine needs_answer:false.
+      // The caller uses it to fall back to answering an obvious technical
+      // question instead of silently dropping it over a format glitch.
       function parseClassifierReply(reply) {
         const m = reply.match(/\{[\s\S]*\}/);
-        if (!m) return { needs_answer: false, confidence: 0 };
+        if (!m) return { needs_answer: false, confidence: 0, parsed: false };
         try {
           const j = JSON.parse(m[0]);
           const needs = typeof j.needs_answer === 'boolean' ? j.needs_answer : !!j.is_question;
@@ -2433,10 +2561,11 @@
             normalized_question: typeof j.normalized_question === 'string' ? j.normalized_question.trim() : '',
             confidence: typeof j.confidence === 'number' ? j.confidence : 0,
             topic: j.topic || '',
-            reason: j.reason || ''
+            reason: j.reason || '',
+            parsed: true
           };
         } catch {
-          return { needs_answer: false, confidence: 0 };
+          return { needs_answer: false, confidence: 0, parsed: false };
         }
       }
 
@@ -2446,23 +2575,50 @@
 
       // One POST to the Apps Script proxy. text/plain avoids the CORS
       // preflight Apps Script can't answer.
-      async function postChat(body, signal) {
+      //
+      // Every call is bounded by a hard timeout. A fetch with no timeout can
+      // hang indefinitely — a slow Apps Script cold-start, a connection that
+      // stalls without ever erroring, the tab being backgrounded mid-request.
+      // Left unbounded, a hung classifier call would freeze the whole assist
+      // pipeline forever (its promise never settles, so TECH.pending never
+      // clears and no further question is ever answered). The timeout aborts
+      // the request so the promise ALWAYS settles; it composes with any
+      // caller-supplied signal so user-initiated cancel still works. A timeout
+      // surfaces as a TimeoutError (not AbortError), so callers treat it as a
+      // real failure to retry/fall back rather than a silent user cancel.
+      async function postChat(body, signal, timeoutMs) {
         if (!GSHEET_WEBHOOK) {
           throw new Error('Answer service is not configured.');
         }
         const payload = Object.assign({ action: 'chat', session_id: SESSION_ID }, body);
-        const resp = await fetch(GSHEET_WEBHOOK, {
-          method: 'POST',
-          headers: { 'Content-Type': 'text/plain;charset=utf-8' },
-          body: JSON.stringify(payload),
-          signal
-        });
-        if (!resp.ok) throw new Error('Proxy HTTP ' + resp.status);
-        const data = await resp.json();
-        if (!data || data.ok === false) {
-          throw new Error((data && data.error) || 'Proxy returned an error');
+        const timer = new AbortController();
+        const ms = timeoutMs || ASSIST.ANSWER_TIMEOUT_MS;
+        const timeoutId = setTimeout(
+          () => { try { timer.abort(new DOMException('Request timed out', 'TimeoutError')); } catch { timer.abort(); } },
+          ms
+        );
+        const onAbort = () => { try { timer.abort(signal.reason); } catch { timer.abort(); } };
+        if (signal) {
+          if (signal.aborted) onAbort();
+          else signal.addEventListener('abort', onAbort, { once: true });
         }
-        return data;
+        try {
+          const resp = await fetch(GSHEET_WEBHOOK, {
+            method: 'POST',
+            headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+            body: JSON.stringify(payload),
+            signal: timer.signal
+          });
+          if (!resp.ok) throw new Error('Proxy HTTP ' + resp.status);
+          const data = await resp.json();
+          if (!data || data.ok === false) {
+            throw new Error((data && data.error) || 'Proxy returned an error');
+          }
+          return data;
+        } finally {
+          clearTimeout(timeoutId);
+          if (signal) signal.removeEventListener('abort', onAbort);
+        }
       }
 
       // Fire-and-forget Q&A save (the proxy's legacy save action). Chat calls
@@ -2616,8 +2772,13 @@
 
       async function runAssistAnswer(idx, question) {
         const slot = STATE.slots[idx];
-        if (slot.loading) return;
+        // Busy with another answer — don't drop this question on the floor.
+        // Re-queue it so it's answered the moment the slot frees (drainQueue
+        // pulls it then). A bare `return` here used to strand both this
+        // question and the queue behind it.
+        if (slot.loading) { enqueueQuestion(question); return; }
         slot.loading = true;
+        TECH.answerSince = Date.now();
 
         // Every auto-answered question starts a visually fresh chat: the
         // previous Q&A slides into Saved Conversations so the panel always
@@ -2728,6 +2889,7 @@
         if (slot.abortController === controller) {
           slot.loading = false;
           slot.abortController = null;
+          TECH.answerSince = 0;
         }
         render();
         scrollChat();
