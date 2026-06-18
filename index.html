@@ -221,7 +221,7 @@
       @keyframes interim-blink { 50% { opacity: 0; } }
 
       /* ===== Message area ===== */
-      .msg-scroll { flex: 6 1 0; min-height: 0; min-width: 0; overflow-y: auto; background: var(--n25); }
+      .msg-scroll { flex: 1 1 0; min-height: 0; min-width: 0; overflow-y: auto; background: var(--n25); }
       .msg-col { max-width: 768px; margin: 0 auto; padding: 28px 24px 16px; display: flex; flex-direction: column; gap: 16px; }
       .msg-row { display: flex; gap: 10px; align-items: flex-start; justify-content: flex-start; }
       .msg-row.me { justify-content: flex-end; }
@@ -401,7 +401,9 @@
       .split-row { flex: 1; min-height: 0; display: flex; flex-direction: row; }
       /* Left column: mic console + composer, 40% of the row width. */
       .top-stage { flex: 4 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; background: #fff; border-right: 1px solid var(--divider); box-shadow: 6px 0 22px rgba(22,31,91,0.05); }
-      .console { flex: 1; min-height: 0; overflow-y: auto; background: #fff; padding: 22px 24px; display: flex; align-items: center; }
+      .console { flex: 1; min-height: 0; overflow-y: auto; background: #fff; padding: 28px 24px; display: flex; align-items: flex-start; }
+      /* Right column: results (scrolls) on top, manual-question composer pinned at the bottom. */
+      .right-col { flex: 6 1 0; min-width: 0; min-height: 0; display: flex; flex-direction: column; }
       .console-inner { max-width: 560px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; align-items: center; text-align: center; gap: 22px; }
 
       /* Status title, sits right above the mic and reflects what Randy is doing. */
@@ -432,10 +434,15 @@
       .cl-stats { margin-left: auto; flex-shrink: 0; font-size: 11.5px; font-weight: 700; color: var(--n600); background: var(--n100); padding: 5px 13px; border-radius: 999px; white-space: nowrap; }
       .cl-stats.busy { color: var(--primary); background: var(--quote); }
 
-      .cl-transcript { margin-top: 0; width: 100%; text-align: center; font-size: 22px; font-weight: 500; line-height: 1.45; color: var(--navy-deep); letter-spacing: -0.01em; min-height: 60px; max-height: 168px; overflow-y: auto; text-wrap: pretty; }
+      .cl-transcript { margin-top: 0; width: 100%; text-align: center; font-size: 22px; font-weight: 500; line-height: 1.45; color: var(--navy-deep); letter-spacing: -0.01em; min-height: 60px; max-height: 168px; overflow-y: auto; overflow-x: hidden; text-wrap: pretty; overflow-wrap: break-word; word-break: break-word; }
       .cl-transcript.cl-tr-muted { font-size: 15px; font-weight: 500; color: var(--n400); }
       .cl-transcript .interim-caret { font-size: 0.7em; }
       .console.stage-analyzing .cl-transcript, .console.stage-researching .cl-transcript { font-size: 18px; }
+      /* Teleprompter format for live voice-to-text: text flows top-to-bottom and
+         wraps within the column (never sideways), with a taller window and a
+         smaller font so more of a long transcript stays on screen at once. The
+         newest words are kept in view by auto-scrolling (see patchLiveTranscript). */
+      .cl-transcript.ac-live { text-align: left; font-size: 17px; line-height: 1.5; max-height: 320px; scroll-behavior: smooth; }
       .cl-prompt { margin: 14px 0 0; font-size: 14.5px; line-height: 1.6; color: var(--gray); max-width: 56ch; text-wrap: pretty; }
       .cl-desktop { margin-top: 10px; font-size: 11px; font-weight: 600; color: var(--n500); display: inline-flex; align-items: center; gap: 6px; }
       .cl-desktop.on { color: var(--primary); }
@@ -457,6 +464,7 @@
         .console-orb-label { display: none; }
         .cl-transcript { font-size: 18px; min-height: 36px; }
         .console.stage-analyzing .cl-transcript, .console.stage-researching .cl-transcript { font-size: 15.5px; }
+        .cl-transcript.ac-live { font-size: 15.5px; max-height: 200px; }
         .cl-stage-label { font-size: 14.5px; }
         .sidebar { position: fixed; inset: 0 auto 0 0; z-index: 60; transform: translateX(-100%); transition: transform 0.22s var(--ease); box-shadow: var(--shadow-hover); width: min(320px, 86vw); }
         .sidebar.open { transform: translateX(0); }
@@ -890,9 +898,18 @@
         srRunning: false,         // recognizer actually running (onstart..onend)
         watchdogId: null,         // background-tab restart watchdog interval
         lastSrEventAt: 0,         // last recognizer activity (wedge detection)
-        micStream: null           // held open (echo cancellation OFF) so the
+        micStream: null,          // held open (echo cancellation OFF) so the
                                   // mic hears the computer's speakers — see
                                   // startListening()
+        // Push-to-talk dictation in the pop-out composer. A SEPARATE
+        // recognizer from the passive one above: the Web Speech API only
+        // runs one recognizer at a time, so while dictation is live the
+        // passive recognizer is paused (dictationPaused) and resumed when
+        // dictation ends — see startDictation()/stopDictation().
+        dictation: null,          // dedicated dictation SpeechRecognition
+        dictating: false,         // dictation actively capturing the mic
+        dictationPaused: false,   // passive recognizer paused for dictation
+        dictationBase: ''         // finalized dictation text staged in the input
       };
 
       // Listening runtime state. Randy hears on two channels: (1) the
@@ -1762,12 +1779,12 @@
         r.onend = () => {
           VOICE.srRunning = false;
           VOICE.lastSrEventAt = Date.now();
-          if (VOICE.ttsPaused) return;
+          if (VOICE.ttsPaused || VOICE.dictationPaused) return;
           if (!VOICE.wantRunning || !recognitionWanted()) return;
           // start() can throw InvalidStateError while the previous session is
           // still shutting down — retry with backoff.
           const tryStart = (attempt) => {
-            if (!VOICE.wantRunning || !recognitionWanted() || VOICE.ttsPaused) return;
+            if (!VOICE.wantRunning || !recognitionWanted() || VOICE.ttsPaused || VOICE.dictationPaused) return;
             try { startRecognitionNow(); }
             catch (err) {
               if (attempt < 4) setTimeout(() => tryStart(attempt + 1), 250 * (attempt + 1));
@@ -1812,7 +1829,7 @@
       function startRecognitionWatchdog() {
         if (VOICE.watchdogId) return;
         VOICE.watchdogId = setInterval(() => {
-          if (!VOICE.wantRunning || !recognitionWanted() || VOICE.ttsPaused) return;
+          if (!VOICE.wantRunning || !recognitionWanted() || VOICE.ttsPaused || VOICE.dictationPaused) return;
           if (!VOICE.srRunning) {
             try { startRecognitionNow(); } catch {}
             return;
@@ -1832,7 +1849,7 @@
       // recognizer that died while the tab was throttled in the background.
       document.addEventListener('visibilitychange', () => {
         if (document.hidden) return;
-        if (VOICE.wantRunning && recognitionWanted() && !VOICE.ttsPaused && !VOICE.srRunning) {
+        if (VOICE.wantRunning && recognitionWanted() && !VOICE.ttsPaused && !VOICE.dictationPaused && !VOICE.srRunning) {
           try { startRecognitionNow(); } catch {}
         }
         // Also a free chance to un-stick a pipeline that wedged while the tab
@@ -1850,7 +1867,7 @@
         try { r.abort(); } catch {}
         // If onend doesn't fire (recognizer was idle), kick it directly.
         setTimeout(() => {
-          if (VOICE.wantRunning && recognitionWanted() && !VOICE.ttsPaused) {
+          if (VOICE.wantRunning && recognitionWanted() && !VOICE.ttsPaused && !VOICE.dictationPaused) {
             try { startRecognitionNow(); } catch {}
           }
         }, 150);
@@ -1867,6 +1884,177 @@
         VOICE.interimSlot = null;
         VOICE.recentTtsText = '';
         STATE.slots.forEach(s => { s.isListening = false; });
+      }
+
+      /* ================================================================
+       * DICTATION — push-to-talk voice typing in the pop-out composer
+       *
+       * A SECOND, independent recognizer. The Web Speech API only runs one
+       * recognizer at a time, so while dictation captures the mic Randy's
+       * passive listener is paused (VOICE.dictationPaused) and resumed the
+       * moment dictation stops. Dictation never auto-sends — it streams the
+       * transcript into #pip-input — and it never cuts the user off: Chrome
+       * silently ends a recognition session after a pause, so onend restarts
+       * it for as long as the user keeps dictating.
+       * ================================================================ */
+
+      // Write the staged dictation text (+ optional live interim) into the
+      // pop-out input. Never throws — the window can vanish mid-write.
+      function syncDictationInput(interim) {
+        const w = PIP.window;
+        if (!w || w.closed) return;
+        let input;
+        try { input = w.document.getElementById('pip-input'); } catch { return; }
+        if (!input) return;
+        const base = VOICE.dictationBase || '';
+        const it = (interim || '').trim();
+        const val = it ? (base ? base.replace(/\s+$/, '') + ' ' + it : it) : base;
+        try {
+          input.value = val;
+          input.selectionStart = input.selectionEnd = val.length;
+          input.scrollLeft = input.scrollWidth;
+        } catch {}
+      }
+
+      // Fold a finalized chunk into the staged dictation text with sane spacing.
+      function appendDictationFinal(chunk) {
+        const add = (chunk || '').trim();
+        if (!add) return;
+        const base = VOICE.dictationBase || '';
+        VOICE.dictationBase = base ? base.replace(/\s+$/, '') + ' ' + add : add;
+      }
+
+      function ensureDictationRecognition() {
+        if (!VOICE.srSupported) return null;
+        if (VOICE.dictation) return VOICE.dictation;
+        const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+        const r = new SR();
+        r.continuous = true;
+        r.interimResults = true;
+        r.lang = 'en-US';
+        r.onresult = (e) => {
+          let interim = '';
+          let finalChunk = '';
+          for (let i = e.resultIndex; i < e.results.length; i++) {
+            const res = e.results[i];
+            const t = res[0] && res[0].transcript ? res[0].transcript : '';
+            if (res.isFinal) finalChunk += t + ' ';
+            else interim += t;
+          }
+          if (finalChunk) appendDictationFinal(finalChunk);
+          syncDictationInput(interim);
+        };
+        r.onerror = (e) => {
+          if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+            showToast('Randy needs microphone access — allow the mic and try again');
+            stopDictation();
+            return;
+          }
+          if (e.error === 'audio-capture') {
+            showToast("Randy couldn't use the microphone — check that one is plugged in");
+            stopDictation();
+            return;
+          }
+          // Transient errors (no-speech, aborted, network) fall through to
+          // onend, which restarts while the user is still dictating.
+        };
+        r.onend = () => {
+          if (VOICE.dictating) {
+            // Chrome ended the session after a pause but the user hasn't
+            // stopped — restart so a long answer is never cut off. start()
+            // can throw while the old session tears down; retry with backoff.
+            const tryStart = (attempt) => {
+              if (!VOICE.dictating) return;
+              try { r.start(); }
+              catch (err) {
+                if (attempt < 4) setTimeout(() => tryStart(attempt + 1), 250 * (attempt + 1));
+              }
+            };
+            tryStart(0);
+            return;
+          }
+          // Dictation finished — settle the input to the finalized text
+          // (drop any dangling interim) and bring Randy's listener back.
+          syncDictationInput('');
+          resumePassiveAfterDictation();
+        };
+        VOICE.dictation = r;
+        return r;
+      }
+
+      // Bring Randy's passive listener back after dictation, if it was on.
+      function resumePassiveAfterDictation() {
+        if (!VOICE.dictationPaused) return;
+        VOICE.dictationPaused = false;
+        if (!VOICE.wantRunning || !recognitionWanted()) return;
+        const tryStart = (attempt) => {
+          if (!VOICE.wantRunning || !recognitionWanted() || VOICE.dictationPaused) return;
+          try { startRecognitionNow(); }
+          catch (err) {
+            if (attempt < 4) setTimeout(() => tryStart(attempt + 1), 250 * (attempt + 1));
+          }
+        };
+        tryStart(0);
+      }
+
+      function toggleDictation() {
+        if (!VOICE.srSupported) { showToast('Voice typing needs Chrome or Edge'); return; }
+        if (VOICE.dictating) stopDictation();
+        else startDictation();
+      }
+
+      function startDictation() {
+        if (!VOICE.srSupported || VOICE.dictating) return;
+        const r = ensureDictationRecognition();
+        if (!r) return;
+        VOICE.dictating = true;
+
+        // Seed the staged text from whatever the user already typed, so
+        // dictation appends rather than overwrites.
+        const w = PIP.window;
+        let existing = '';
+        try { existing = (w && !w.closed && w.document.getElementById('pip-input').value) || ''; } catch {}
+        VOICE.dictationBase = existing.trim();
+
+        // Pause Randy's passive listener so the two recognizers don't fight
+        // over the mic. Keep VOICE.wantRunning intact so resume knows to
+        // restart it. abort() releases the mic fastest; its onend bails out
+        // immediately because dictationPaused is set.
+        if (VOICE.wantRunning && recognitionWanted()) {
+          VOICE.dictationPaused = true;
+          try { VOICE.recognition && VOICE.recognition.abort(); } catch {}
+        }
+
+        // Start the dictation recognizer. The passive recognizer may still be
+        // releasing the mic, so retry with backoff on InvalidStateError.
+        const tryStart = (attempt) => {
+          if (!VOICE.dictating) return;
+          try { r.start(); }
+          catch (err) {
+            if (attempt < 6) setTimeout(() => tryStart(attempt + 1), 200 * (attempt + 1));
+          }
+        };
+        tryStart(0);
+
+        try { if (w && !w.closed) w.document.getElementById('pip-input').focus(); } catch {}
+        render();
+      }
+
+      function stopDictation() {
+        if (!VOICE.dictating) {
+          // Already stopped, but make sure the listener isn't stuck paused.
+          resumePassiveAfterDictation();
+          return;
+        }
+        VOICE.dictating = false;       // onend won't restart now
+        if (VOICE.dictation) {
+          try { VOICE.dictation.stop(); } catch {}
+        } else {
+          // No recognizer to fire onend — resume the listener directly.
+          syncDictationInput('');
+          resumePassiveAfterDictation();
+        }
+        render();
       }
 
       /* ================================================================
@@ -1946,6 +2134,9 @@
         if (!wrap || !span) return false;
         span.textContent = text;
         wrap.classList.toggle('hearing', !!text);
+        // Teleprompter: as the transcript grows, keep the latest words in view
+        // by pinning the scroll position to the bottom of the column.
+        wrap.scrollTop = wrap.scrollHeight;
         return true;
       }
 
@@ -2186,6 +2377,33 @@
        * feeds — so answers happen the same way regardless of source.
        * ================================================================ */
 
+      // PCM tap that runs OFF the main thread. The old ScriptProcessorNode
+      // fired its callback on the main thread, so every audio block competed
+      // with rendering and made the page lag while computer-audio capture was
+      // running. This AudioWorklet does the same job on the audio thread and
+      // batches samples into 4096-frame blocks so the main-thread VAD math in
+      // processDesktopBlock() stays identical. Loaded from a Blob URL to keep
+      // the app single-file. NOTE: keep this free of ${...} — it's a template.
+      const PCM_WORKLET_SRC = `
+        class RandyPCM extends AudioWorkletProcessor {
+          constructor() { super(); this._buf = new Float32Array(4096); this._n = 0; }
+          process(inputs) {
+            const ch = inputs[0] && inputs[0][0];
+            if (ch) {
+              for (let i = 0; i < ch.length; i++) {
+                this._buf[this._n++] = ch[i];
+                if (this._n === this._buf.length) {
+                  this.port.postMessage(this._buf.slice(0));
+                  this._n = 0;
+                }
+              }
+            }
+            return true;
+          }
+        }
+        registerProcessor('randy-pcm', RandyPCM);
+      `;
+
       // The transcription worker. Loaded from a Blob URL so it stays inside
       // this single-file app; it pulls Transformers.js from a CDN and keeps
       // WASM single-threaded so no cross-origin isolation (SharedArrayBuffer)
@@ -2238,7 +2456,22 @@
         if (DESKTOP.on || !DESKTOP.supported) return;
         let stream;
         try {
-          stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+          // We only ever want the AUDIO from this share — the video track is
+          // stopped immediately below. Requesting a full-res/full-framerate
+          // screen capture just to discard it is what makes the UI freeze the
+          // moment you pick a surface in the picker, so constrain the video to
+          // a tiny 1 fps stream: the capture pipeline becomes nearly free while
+          // the picker still offers the same "share tab/system audio" choices.
+          // The picker hints keep surface-switching available and stop the
+          // captured audio from being echoed back out of the local speakers.
+          stream = await navigator.mediaDevices.getDisplayMedia({
+            video: { frameRate: { ideal: 1, max: 1 }, width: { max: 640 }, height: { max: 360 } },
+            audio: true,
+            selfBrowserSurface: 'include',
+            surfaceSwitching: 'include',
+            systemAudio: 'include',
+            suppressLocalAudioPlayback: false
+          });
         } catch (err) {
           // Picker dismissed or permission denied — continue mic-only.
           return;
@@ -2264,16 +2497,39 @@
           DESKTOP.audioCtx = new Ctx({ sampleRate: ASR.SAMPLE_RATE });
           if (DESKTOP.audioCtx.state === 'suspended') { try { await DESKTOP.audioCtx.resume(); } catch {} }
           DESKTOP.sourceNode = DESKTOP.audioCtx.createMediaStreamSource(new MediaStream([audioTracks[0]]));
-          const proc = DESKTOP.audioCtx.createScriptProcessor(4096, 1, 1);
-          proc.onaudioprocess = (e) => { processDesktopBlock(e.inputBuffer.getChannelData(0)); };
-          DESKTOP.sourceNode.connect(proc);
-          // ScriptProcessor only runs when connected to a destination; route it
-          // through a silent gain so the call isn't echoed back to the speakers.
+
+          // A silent gain → destination "pulls" the graph so the tap keeps
+          // running without echoing the captured audio back to the speakers.
           const sink = DESKTOP.audioCtx.createGain();
           sink.gain.value = 0;
-          proc.connect(sink);
           sink.connect(DESKTOP.audioCtx.destination);
-          DESKTOP.procNode = proc;
+
+          // Prefer the AudioWorklet (off the main thread → no UI lag). Fall
+          // back to the deprecated ScriptProcessor only where it's missing.
+          let usingWorklet = false;
+          if (DESKTOP.audioCtx.audioWorklet) {
+            try {
+              if (!DESKTOP.workletUrl) {
+                DESKTOP.workletUrl = URL.createObjectURL(new Blob([PCM_WORKLET_SRC], { type: 'text/javascript' }));
+              }
+              await DESKTOP.audioCtx.audioWorklet.addModule(DESKTOP.workletUrl);
+              const node = new AudioWorkletNode(DESKTOP.audioCtx, 'randy-pcm');
+              node.port.onmessage = (e) => processDesktopBlock(e.data);
+              DESKTOP.sourceNode.connect(node);
+              node.connect(sink);
+              DESKTOP.procNode = node;
+              usingWorklet = true;
+            } catch (e) {
+              console.warn('AudioWorklet unavailable — using ScriptProcessor fallback:', (e && e.message) || e);
+            }
+          }
+          if (!usingWorklet) {
+            const proc = DESKTOP.audioCtx.createScriptProcessor(4096, 1, 1);
+            proc.onaudioprocess = (e) => { processDesktopBlock(e.inputBuffer.getChannelData(0)); };
+            DESKTOP.sourceNode.connect(proc);
+            proc.connect(sink);
+            DESKTOP.procNode = proc;
+          }
         } catch (err) {
           showToast('Randy could not set up computer-audio capture — using mic only.');
           stopDesktopCapture();
@@ -2413,12 +2669,20 @@
       }
 
       function stopDesktopCapture() {
-        if (DESKTOP.procNode) { try { DESKTOP.procNode.disconnect(); DESKTOP.procNode.onaudioprocess = null; } catch {} DESKTOP.procNode = null; }
+        if (DESKTOP.procNode) {
+          try {
+            DESKTOP.procNode.disconnect();
+            if (DESKTOP.procNode.port) DESKTOP.procNode.port.onmessage = null; // AudioWorkletNode
+            DESKTOP.procNode.onaudioprocess = null;                            // ScriptProcessorNode
+          } catch {}
+          DESKTOP.procNode = null;
+        }
         if (DESKTOP.sourceNode) { try { DESKTOP.sourceNode.disconnect(); } catch {} DESKTOP.sourceNode = null; }
         if (DESKTOP.audioCtx) { try { DESKTOP.audioCtx.close(); } catch {} DESKTOP.audioCtx = null; }
         if (DESKTOP.stream) { try { DESKTOP.stream.getTracks().forEach(t => t.stop()); } catch {} DESKTOP.stream = null; }
         if (DESKTOP.worker) { try { DESKTOP.worker.terminate(); } catch {} DESKTOP.worker = null; }
         if (DESKTOP.workerUrl) { try { URL.revokeObjectURL(DESKTOP.workerUrl); } catch {} DESKTOP.workerUrl = null; }
+        if (DESKTOP.workletUrl) { try { URL.revokeObjectURL(DESKTOP.workletUrl); } catch {} DESKTOP.workletUrl = null; }
         DESKTOP.on = false;
         DESKTOP.workerReady = false;
         DESKTOP.modelLoading = false;
@@ -3453,6 +3717,22 @@
           <div class="split-row">
             <div class="top-stage">
               ${renderConsole(slot, idx, vm)}
+            </div>
+            <div class="right-col">
+              <div id="home-scroll-${idx}" class="msg-scroll">
+                <div class="msg-col">
+                  ${hasMsgs ? slot.messages.map((m, mi) => `
+                    <div class="msg-row ${m.role === 'user' ? 'me' : ''}">
+                      ${m.role === 'user' ? renderUserMessage(m) : renderBotMessage(slot, m, mi, idx)}
+                    </div>
+                  `).join('') + (slot.loading ? `
+                    <div class="msg-row">
+                      <div class="msg-av">${escHtml(slot.label.charAt(0))}</div>
+                      <div class="chat-bubble chat-bot typing"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
+                    </div>
+                  ` : '') : renderHomeEmpty(slot)}
+                </div>
+              </div>
               <div class="composer-zone">
                 <div class="composer">
                   <textarea id="home-input-${idx}" class="composer-input" rows="1" placeholder="Message ${escAttr(slot.label)}…" ${slot.loading ? 'disabled' : ''}>${escHtml(slot.inputText || '')}</textarea>
@@ -3460,20 +3740,6 @@
                     <i data-lucide="arrow-up" class="w-5 h-5"></i>
                   </button>
                 </div>
-              </div>
-            </div>
-            <div id="home-scroll-${idx}" class="msg-scroll">
-              <div class="msg-col">
-                ${hasMsgs ? slot.messages.map((m, mi) => `
-                  <div class="msg-row ${m.role === 'user' ? 'me' : ''}">
-                    ${m.role === 'user' ? renderUserMessage(m) : renderBotMessage(slot, m, mi, idx)}
-                  </div>
-                `).join('') + (slot.loading ? `
-                  <div class="msg-row">
-                    <div class="msg-av">${escHtml(slot.label.charAt(0))}</div>
-                    <div class="chat-bubble chat-bot typing"><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div>
-                  </div>
-                ` : '') : renderHomeEmpty(slot)}
               </div>
             </div>
           </div>`;
@@ -3898,7 +4164,17 @@
         .pip-send { width: 38px; height: 38px; border-radius: 50%; background: var(--primary); color: #fff; border: none; display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s; }
         .pip-send:hover { background: var(--primary-hover); }
         .pip-send:disabled { background: #cbd5e1; cursor: not-allowed; }
-        @media (prefers-reduced-motion: reduce) { .pip-dot.live, .pip-mini-dot.live, .pip-mini.is-live .pip-mini-ring, .pip-mini.has-unseen .pip-mini-orb, .pip-mini-dots i, .pip-new, .pip-tdot, .pip-live-wave i, .pip-live-dots i, .pip-live-caret { animation: none; } }
+        .pip-mic { width: 38px; height: 38px; border-radius: 50%; background: #fff; color: var(--primary); border: 1.5px solid var(--divider); display: grid; place-items: center; cursor: pointer; flex-shrink: 0; transition: background 0.15s, color 0.15s, border-color 0.15s; }
+        .pip-mic:hover { border-color: var(--primary); background: #F5F9FF; }
+        .pip-mic svg { width: 17px; height: 17px; }
+        .pip-mic .pip-mic-live { display: none; }
+        .pip-mic:disabled { opacity: 0.45; cursor: not-allowed; }
+        .pip-mic.recording { background: #EF4444; border-color: #EF4444; color: #fff; animation: pipMicPulse 1.5s ease-in-out infinite; }
+        .pip-mic.recording:hover { background: #DC2626; border-color: #DC2626; }
+        .pip-mic.recording .pip-mic-idle { display: none; }
+        .pip-mic.recording .pip-mic-live { display: block; }
+        @keyframes pipMicPulse { 0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.45); } 50% { box-shadow: 0 0 0 6px rgba(239,68,68,0); } }
+        @media (prefers-reduced-motion: reduce) { .pip-dot.live, .pip-mini-dot.live, .pip-mini.is-live .pip-mini-ring, .pip-mini.has-unseen .pip-mini-orb, .pip-mini-dots i, .pip-new, .pip-tdot, .pip-live-wave i, .pip-live-dots i, .pip-live-caret, .pip-mic.recording { animation: none; } }
       `;
 
       // Toggle the floating window. Must run from a real user click —
@@ -3999,6 +4275,10 @@
             <button class="pip-send" id="pip-send" data-action="pip-send" title="Send message" aria-label="Send message">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></svg>
             </button>
+            <button class="pip-mic" id="pip-mic" data-action="pip-dictate" title="Dictate your message — voice to text" aria-label="Dictate your message" aria-pressed="false"${VOICE.srSupported ? '' : ' disabled'}>
+              <svg class="pip-mic-idle" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2a3 3 0 0 0-3 3v7a3 3 0 0 0 6 0V5a3 3 0 0 0-3-3Z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="22"/></svg>
+              <svg class="pip-mic-live" viewBox="0 0 24 24" fill="currentColor" stroke="none"><rect x="6" y="6" width="12" height="12" rx="2.5"/></svg>
+            </button>
           </div>
           <button class="pip-mini" id="pip-mini" data-action="pip-expand" title="Randy is listening — click to open the chat" aria-label="Open the chat">
             <span class="pip-mini-stage">
@@ -4018,6 +4298,7 @@
         doc.addEventListener('click', e => {
           if (!e.target.closest) return;
           if (e.target.closest('[data-action="pip-send"]')) { sendFromPip(); return; }
+          if (e.target.closest('[data-action="pip-dictate"]')) { toggleDictation(); return; }
           if (e.target.closest('[data-action="pip-minimize"]')) { collapsePip(); return; }
           if (e.target.closest('[data-action="pip-expand"]')) { expandPip(); return; }
           if (e.target.closest('[data-action="pip-toggle-speak"]')) { toggleSpeakFromPip(); return; }
@@ -4038,6 +4319,7 @@
         });
         w.addEventListener('pagehide', () => {
           if (PIP.swapping) return; // window replaced by a swap, not closed
+          if (VOICE.dictating) stopDictation(); // free the mic, resume Randy
           if (PIP.window === w) {
             PIP.window = null;
             PIP.slotIdx = null;
@@ -4077,6 +4359,9 @@
         if (!slot || !input) return;
         const text = input.value.trim();
         if (!text || slot.loading) return;
+        // Sending ends dictation — clear the staged text first so the
+        // recognizer's trailing onend can't repaint the just-cleared input.
+        if (VOICE.dictating) { VOICE.dictationBase = ''; stopDictation(); }
         slot.inputText = text;
         input.value = '';
         sendMessage(PIP.slotIdx); // its render() syncs the pop-out too
@@ -4149,6 +4434,7 @@
       async function collapsePip() {
         const w = PIP.window;
         if (!w || w.closed || PIP.collapsed || PIP.swapping) return;
+        if (VOICE.dictating) stopDictation(); // the input is hidden while collapsed
         PIP.collapsed = true;
         PIP.unseen = 0;
         PIP.flashNext = false;
@@ -4457,6 +4743,16 @@
 
           const sendBtn = doc.getElementById('pip-send');
           if (sendBtn && sendBtn.disabled !== !!slot.loading) sendBtn.disabled = !!slot.loading;
+
+          // Dictation mic — reflect the live recording state.
+          const micBtn = doc.getElementById('pip-mic');
+          if (micBtn) {
+            micBtn.classList.toggle('recording', !!VOICE.dictating);
+            micBtn.setAttribute('aria-pressed', VOICE.dictating ? 'true' : 'false');
+            if (micBtn.disabled !== !VOICE.srSupported) micBtn.disabled = !VOICE.srSupported;
+            const t = VOICE.dictating ? 'Stop dictation' : 'Dictate your message — voice to text';
+            if (micBtn.title !== t) micBtn.title = t;
+          }
         } catch (err) {
           console.warn('renderPip failed:', err);
         }
