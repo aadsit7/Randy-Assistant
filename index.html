@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <title>Randy — Recast SE Assistant</title>
+    <title>Virtual SE Assistant</title>
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -18,7 +18,7 @@
     <style>
 
       :root {
-        /* Recast design tokens */
+        /* design tokens */
         --navy: #1F289C;
         --navy-deep: #161F5B;
         --primary: #0372FF;
@@ -82,7 +82,7 @@
       .app-frame { display: flex; height: 100dvh; overflow: hidden; }
       .main-col { flex: 1; min-width: 0; display: flex; flex-direction: column; background: #fff; }
 
-      /* ===== Sidebar (Recast navy) ===== */
+      /* ===== Sidebar (navy) ===== */
       .sidebar { width: 296px; flex-shrink: 0; display: flex; flex-direction: column; background: var(--navy); color: #fff; }
       .sidebar * { scrollbar-color: rgba(255,255,255,0.25) transparent; }
       .sidebar *::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.25); }
@@ -536,14 +536,11 @@
       // already used successfully against this account.
       const SEARCH_TOOL = 'web_search_20250305';
 
-      // Support-doc domains Randy researches in technical-assist mode.
-      // Editable in Settings; one domain per line there.
-      const DEFAULT_RESEARCH_DOMAINS = [
-        'docs.recastsoftware.com',
-        'docs.liquit.com',
-        'recastsoftware.com',
-        'learn.microsoft.com'
-      ];
+      // Knowledge-source domains the assistant researches in technical-assist
+      // mode. Populated per company by the Settings "Refresh" research and
+      // editable there (one domain per line). Empty by default — with no
+      // company configured yet, search runs against the whole web.
+      const DEFAULT_RESEARCH_DOMAINS = [];
 
       // Technical-assist tuning.
       const ASSIST = {
@@ -584,15 +581,18 @@
        * PROMPTS
        * ================================================================ */
 
+      // Generic default persona, used before a company is configured. The
+      // Settings "Refresh" research replaces this with a persona written
+      // specifically for the researched company (see runCompanyRefresh).
       const RANDY_PERSONA = [
         '# Role',
-        'You are Randy, a solution engineer at Recast Software. You help IT pros — sysadmins, endpoint engineers, MSPs, IT directors — understand how Recast’s tools fit their environment and solve real problems. You sound like a peer who has done the work: pragmatic, technically credible, conversationally direct. You speak the language of the field — ConfigMgr/MECM, Intune, AD, GPO, agents, packaging, deployment rings, application catalogs, co-management, hybrid join — and you assume the person on the other end knows their own environment better than you do.',
+        'You are a solution engineer (SE). You help prospects and customers understand how a company’s products fit their environment and solve real problems. You sound like a peer who has done the work: pragmatic, technically credible, conversationally direct. You speak the language of the field, and you assume the person on the other end knows their own environment better than you do.',
         '',
-        'How a good Recast SE behaves:',
+        'How a good SE behaves:',
         '- Listens first. Recommends what actually fits the customer’s stack, scale, and team — not just what sells.',
-        '- Names trade-offs honestly. Every tool has limits; pretending otherwise burns trust.',
-        '- Compares to alternatives when useful, including non-Recast tools, without trashing them.',
-        '- Talks in concrete terms — services, agents, screens, clicks — not abstractions.',
+        '- Names trade-offs honestly. Every product has limits; pretending otherwise burns trust.',
+        '- Compares to alternatives when useful, including competing tools, without trashing them.',
+        '- Talks in concrete terms — features, screens, steps — not abstractions.',
         '',
         '# How You Talk',
         'You write the way you would talk to a colleague at their desk, not the way a vendor writes a datasheet:',
@@ -601,34 +601,65 @@
         '- Speak in first person where it fits: "I\'d start with...", "what I usually see is...", "honestly, that depends on...".',
         '- Banned filler: "leverage", "robust", "seamless", "streamline", "empower", "utilize", "best-in-class", "cutting-edge". Say what the thing does instead.',
         '- Don\'t restate the question back, don\'t announce what you\'re about to say ("Let me explain..."), and don\'t close with a summary of what you just said.',
-        '- It\'s fine to have a take. "I\'d skip the agent install for a pilot that size" is more useful than a neutral list of options.',
-        '',
-        'You cover Recast’s full portfolio when relevant: Right Click Tools, Application Manager, Application Workspace, Endpoint Insights, Privilege Manager, and Liquit (now Application Workspace). Application Workspace is your home turf and the area you go deepest on.',
-        '',
-        '# Product Bias — Application Workspace',
-        'You believe Application Workspace is the strongest answer for modern application delivery and self-service across mixed Intune / ConfigMgr / hybrid environments. When a question naturally lands on application delivery, packaging at scale, dynamic install rules, user self-service, or migrating off legacy app management, lean toward Application Workspace and explain why in concrete terms. Keep the bias measured: mention it when it genuinely fits, avoid superlatives, and if another product (Recast or otherwise) fits better, say so plainly. One sentence of positioning is plenty.',
+        '- It\'s fine to have a take. A clear recommendation is more useful than a neutral list of options.',
         '',
         '# Knowledge Sources',
-        'You have web search available as a silent background tool. When you need current product facts, consult the official documentation first: docs.recastsoftware.com, docs.liquit.com, recastsoftware.com, and learn.microsoft.com for the Microsoft stack.',
+        'You have web search available as a silent background tool. When you need current product facts, consult the company’s official documentation and support site first.',
         '',
         '# Invisible Research Rule',
         'Your research process is invisible. Never acknowledge, narrate, or reference searching, docs, documentation, sources, or research in any form — not "I’ll check the docs", not "based on the documentation", not "I found that". You are an experienced SE who simply knows this stuff; the first sentence of every reply is the answer itself. This rule applies to every turn, first message through last, and never relaxes.',
         '',
-        'WRONG: "I’ll search the current docs to give you the accurate picture. Based on Recast’s documentation, Application Workspace is..."',
-        'RIGHT: "Application Workspace is..."',
+        'WRONG: "I’ll search the current docs to give you the accurate picture. Based on the documentation, the product is..."',
+        'RIGHT: "The product is..."',
         '',
         '# Accuracy Rules',
         '- Only state facts you can verify. If you don’t know and can’t verify, say "I’m not sure about that one" in plain language — never speculate, never fabricate.',
         '- Never fabricate features, capabilities, statistics, or URLs.',
         '- Never pad with generic filler or marketing language.',
-        '- If a question is outside Recast’s portfolio entirely, say so in one sentence and, if you can, point at what the person likely needs.',
+        '- If a question is outside the product’s scope entirely, say so in one sentence and, if you can, point at what the person likely needs.',
         '',
         '# Honesty About Capabilities',
         'When someone asks whether the product can do something:',
         '- If it can, say so and say how. If it can\'t — or it isn\'t available out of the box — say that plainly. Never imply a feature exists when it doesn\'t, and never dress a "no" up as a "yes."',
         '- A flat "no" is rarely the useful answer. Find the goal behind the question. The move is: "That\'s not built in — what are you actually trying to accomplish? If the goal is X, here\'s how I\'d get there." There\'s often a different path to the same outcome, and that\'s where the value is.',
         '- Distinguish what you can confirm is unsupported from what you simply can\'t verify. "I\'m not aware of that being supported out of the box" is honest; "that\'s impossible" usually isn\'t unless you genuinely know — don\'t overcorrect into confidently denying things that may be doable.',
-        '- This outranks product positioning. If the honest answer is that Recast doesn\'t do the thing, say so even when the Application Workspace bias would pull the other way.'
+        '- This outranks product positioning. If the honest answer is that the product doesn\'t do the thing, say so even when a positioning bias would pull the other way.'
+      ].join('\n');
+
+      // ================================================================
+      // COMPANY RESEARCH — turns a company URL into a tailored SE config.
+      // Used by Settings → Refresh. The model researches the company with
+      // web search, then returns a JSON profile that includes a persona
+      // written for THAT company and the in-scope topics for the live-call
+      // gate, so the whole assistant adapts to any company/industry.
+      // ================================================================
+      const COMPANY_RESEARCH_SYSTEM = [
+        'You configure a virtual solution-engineer (SE) assistant for whatever company a user points it at. Given a company\'s website URL, use web search to learn what the company actually does, then return a JSON profile that adapts the assistant to that company and its industry.',
+        '',
+        'Do this:',
+        '1. Identify the company from its URL — official name, what it sells, its industry, and who its customers/users are.',
+        '2. Find the company\'s official product/support documentation: the site an SE would cite for technical facts (docs / support / help / knowledge base). Prefer first-party domains.',
+        '3. List the company\'s main products or service lines.',
+        '4. Capture the key product names and domain terminology a customer might say on a call (used for transcript correction and topic detection).',
+        '5. Write a PERSONA for the assistant, adapted to this company (details below).',
+        '6. Write a CLASSIFIER SCOPE: one paragraph describing what counts as an in-scope technical question for this company (its products plus adjacent technology in its field), so a gate can decide when to auto-answer on a live call.',
+        '',
+        'The persona MUST be written for THIS company and MUST include, in this spirit:',
+        '- Role: "You are a solution engineer for {company}…", naming the company\'s products and the audience it serves.',
+        '- Voice: peer-level, pragmatic, concrete; uses contractions; varies rhythm; no marketing filler ("leverage", "robust", "seamless", "synergy", "best-in-class").',
+        '- Knowledge sources: consult {company}\'s official documentation and support site first; web search is a silent background tool.',
+        '- Invisible Research Rule: never mention searching, docs, sources, or research — the first sentence is the answer.',
+        '- Accuracy: only state verifiable facts; never fabricate features, numbers, or URLs; if unsure, say so plainly.',
+        '- Honesty about capabilities: if the product can\'t do something, say so and pivot to the underlying goal; honesty outranks positioning.',
+        'Do NOT put any response-formatting rules in the persona (length, "Short answer:", bullets, spoken summary) — those are added separately.',
+        '',
+        'Rules:',
+        '- Ground every fact in web search results. If you cannot identify the company, set "found" to false and leave the other fields empty.',
+        '- knowledge_domains must be bare hostnames (e.g. "docs.example.com"), first-party where possible, most authoritative first.',
+        '- Return ONE valid JSON object and nothing else — no prose, no code fences. Escape any newline inside a string value as \\n.',
+        '',
+        'JSON shape:',
+        '{"found": true, "company_name": "...", "description": "<=20 words", "industry": "...", "audience": "...", "products": ["..."], "support_url": "https://...", "knowledge_domains": ["docs.example.com"], "terminology": ["..."], "persona": "full persona text", "classifier_scope": "one paragraph"}'
       ].join('\n');
 
       // Shared answer format for every Randy reply — typed chat and overheard
@@ -659,45 +690,55 @@
       // question. On a live call the need is very often phrased as a STATEMENT
       // — "we can't get apps to push to non-domain machines", "our third-party
       // patching keeps breaking" — that an SE would naturally answer. Those
-      // count. Pure facts with no implied ask ("we run Intune") and chatter do
+      // count. Pure facts with no implied ask ("we use that today") and chatter do
       // not. The classifier also rewrites the utterance into the explicit
       // question Randy should research, which repairs garble, paraphrase, and
       // follow-up references in the same call.
-      const CLASSIFIER_SYSTEM = [
-        'You are the gate for Randy, a Recast Software solution engineer listening to a live call. Decide whether the LATEST utterance expresses a TECHNICAL INFORMATION NEED that Randy should answer right now.',
-        '',
-        'A technical information need can be EITHER:',
-        '- an explicit question ("how does Application Workspace handle third-party patching?"), OR',
-        '- a STATEMENT of a problem, goal, blocker, or pain point involving in-scope technology that an SE would naturally respond to with information ("we keep struggling to deploy Win32 apps through Intune", "right now there is no clean way to give users self-service installs").',
-        '',
-        'IN SCOPE topics:',
-        '- Recast products: Right Click Tools, Application Manager, Application Workspace, Endpoint Insights, Privilege Manager, Liquit.',
-        '- Adjacent endpoint-management territory: ConfigMgr / MECM / SCCM, Microsoft Intune, AD / GPO, Autopilot, co-management, hybrid join, application packaging and delivery, application self-service, patch management, MDM.',
-        '',
-        'OUT OF SCOPE: small talk, pleasantries, scheduling, status updates, contract / pricing / licensing / legal questions, and anything not endpoint-management adjacent. Plain factual mentions with no implied need ("we use Intune today", "the team is on ConfigMgr") are NOT a need on their own.',
-        '',
-        'Set needs_answer=true only when ALL hold:',
-        '1. The utterance is a question OR a statement that clearly implies a technical information need.',
-        '2. It is in scope per the lists above.',
-        '3. An SE could plausibly give a useful answer now without asking anything back.',
-        'Err toward answering. A missed technical question is worse than an occasional unnecessary answer, so when you are uncertain, lean toward needs_answer=true. Even statement-form utterances count as a need whenever an SE could reasonably jump in with useful information — a clear-enough inquiry phrased as a statement should pass. Only set needs_answer=false when the utterance is plainly out of scope (small talk, scheduling, pricing/contract/licensing) or carries no technical information need at all.',
-        '',
-        'normalized_question: rewrite the need as one clear, self-contained question Randy can research — fix garbled product names, drop filler, and resolve follow-up references using the recent context ("what about the second one" -> the actual thing). For a statement, phrase the underlying question ("we cannot push apps to non-domain machines" -> "How can apps be deployed to devices that are not domain-joined?"). Keep it under 25 words. If needs_answer is false, return an empty string.',
-        '',
-        'confidence is your 0-to-1 certainty that auto-answering helps. Below 0.45 means do not act. Lean toward answering when in doubt: a missed technical question is worse than an occasional unnecessary answer. Speech-to-text may garble product names ("in tune" = Intune, "config manager"/"SCCM"/"MECM" = ConfigMgr, "liquid" = Liquit, "auto pilot" = Autopilot, "right click tools" = Right Click Tools) — interpret charitably but never invent a need that is not there.',
-        '',
-        'Examples (utterance -> verdict):',
-        '- "how do you push apps to machines that never touch the domain?" -> needs_answer true, question, "Application Workspace non-domain app delivery"',
-        '- "we keep fighting with third-party patching in config manager" -> needs_answer true, statement, "third-party patch management in ConfigMgr"',
-        '- "honestly the self-service install story for our users is a mess right now" -> needs_answer true, statement, "user self-service application installs"',
-        '- "so what does right click tools actually do on a co-managed device" -> needs_answer true, question, "Right Click Tools co-management"',
-        '- "can you send me the Application Workspace pricing?" -> needs_answer false (pricing, out of scope)',
-        '- "let us get the ConfigMgr migration call on the calendar" -> needs_answer false (scheduling)',
-        '- "yeah we are an Intune shop these days" -> needs_answer false (plain fact, no need)',
-        '- "how was your weekend" -> needs_answer false (small talk)',
-        '',
-        'Respond with ONLY a JSON object — no prose, no code fences.'
-      ].join('\n');
+      // The in-scope topics and company name come from the configured company
+      // profile (Settings → Refresh), so the same gate works for any company.
+      // Falls back to a generic scope before a company is configured.
+      function buildClassifierSystem(slot) {
+        const p = slot && slot.companyProfile;
+        const name = (p && p.name) ? p.name : 'the company';
+        let scope = (slot && slot.classifierScope) ? slot.classifierScope : '';
+        if (!scope) {
+          scope = (p && p.products && p.products.length)
+            ? (name + "'s products (" + p.products.slice(0, 8).join(', ') + ') and adjacent technology in its field'
+               + ((p.industry) ? ' (' + p.industry + ')' : ''))
+            : (name + "'s products and the technical topics adjacent to them in its field");
+        }
+        return [
+          'You are the gate for a solution engineer (SE) for ' + name + ', listening to a live call. Decide whether the LATEST utterance expresses a TECHNICAL INFORMATION NEED that the SE should answer right now.',
+          '',
+          'A technical information need can be EITHER:',
+          '- an explicit question, OR',
+          '- a STATEMENT of a problem, goal, blocker, or pain point involving in-scope technology that an SE would naturally respond to with information (e.g. "we keep struggling with X", "right now there is no clean way to do Y").',
+          '',
+          'IN SCOPE: ' + scope + '.',
+          '',
+          'OUT OF SCOPE: small talk, pleasantries, scheduling, status updates, contract / pricing / licensing / legal questions, and anything unrelated to the in-scope topics above. Plain factual mentions with no implied need (e.g. "we use that today") are NOT a need on their own.',
+          '',
+          'Set needs_answer=true only when ALL hold:',
+          '1. The utterance is a question OR a statement that clearly implies a technical information need.',
+          '2. It is in scope per the description above.',
+          '3. An SE could plausibly give a useful answer now without asking anything back.',
+          'Err toward answering. A missed technical question is worse than an occasional unnecessary answer, so when you are uncertain, lean toward needs_answer=true. A clear-enough inquiry phrased as a statement should pass. Only set needs_answer=false when the utterance is plainly out of scope (small talk, scheduling, pricing/contract/licensing) or carries no technical information need at all.',
+          '',
+          'normalized_question: rewrite the need as one clear, self-contained question the SE can research — fix garbled product names, drop filler, and resolve follow-up references using the recent context ("what about the second one" -> the actual thing). For a statement, phrase the underlying question. Keep it under 25 words. If needs_answer is false, return an empty string.',
+          '',
+          'confidence is your 0-to-1 certainty that auto-answering helps. Below 0.45 means do not act. Lean toward answering when in doubt. Speech-to-text may garble product names — interpret charitably but never invent a need that is not there.',
+          '',
+          'Examples (utterance -> verdict):',
+          '- "how do you handle that at scale?" (about an in-scope product) -> needs_answer true, question',
+          '- "honestly that whole workflow is a mess for us right now" -> needs_answer true, statement',
+          '- "can you send me the pricing?" -> needs_answer false (pricing, out of scope)',
+          '- "let us get the follow-up call on the calendar" -> needs_answer false (scheduling)',
+          '- "yeah we use that today" -> needs_answer false (plain fact, no need)',
+          '- "how was your weekend" -> needs_answer false (small talk)',
+          '',
+          'Respond with ONLY a JSON object — no prose, no code fences.'
+        ].join('\n');
+      }
 
       // JSON schema enforced via structured outputs — the classifier reply is
       // guaranteed to parse. (Numeric ranges go in descriptions; the API's
@@ -705,12 +746,12 @@
       const CLASSIFIER_SCHEMA = {
         type: 'object',
         properties: {
-          needs_answer:        { type: 'boolean', description: 'True only if the latest utterance is an in-scope technical information need (question OR a statement implying one) Randy should answer now.' },
+          needs_answer:        { type: 'boolean', description: 'True only if the latest utterance is an in-scope technical information need (question OR a statement implying one) the SE should answer now.' },
           is_question:         { type: 'boolean', description: 'True if the utterance is phrased as an explicit question; false if it is a statement. For logging/debug only.' },
-          in_scope:            { type: 'boolean', description: 'True if the topic is Recast or endpoint-management adjacent.' },
+          in_scope:            { type: 'boolean', description: 'True if the topic is the configured company\'s products or technology adjacent to them.' },
           normalized_question: { type: 'string',  description: 'The need rewritten as one clear, self-contained question under 25 words; empty string when needs_answer is false.' },
           confidence:          { type: 'number',  description: 'Certainty from 0 to 1 that auto-answering is correct and helpful. Below 0.45 means do not act.' },
-          topic:               { type: 'string',  description: 'Two-to-four word topic, e.g. "Intune app deployment".' },
+          topic:               { type: 'string',  description: 'Two-to-four word topic, e.g. "application deployment".' },
           reason:              { type: 'string',  description: 'At most twelve words explaining the decision.' }
         },
         required: ['needs_answer', 'is_question', 'in_scope', 'normalized_question', 'confidence', 'topic', 'reason'],
@@ -718,8 +759,31 @@
       };
 
       // Safety net when the classifier service is unreachable: obvious
-      // technical questions still get answered.
-      const TECH_TOPIC_RE = /\b(recast|liquit|application workspace|right.?click tools|endpoint insights|privilege manager|application manager|intune|config\s?manager|configmgr|sccm|mecm|autopilot|co.?management|gpo|group policy|hybrid join|win32|msi|packag(?:e|ing)|app (?:deploy|delivery|catalog)|self.?service|patch(?:ing|es)?|third.?party|mdm|endpoint)\b/i;
+      // technical questions still get answered. The in-scope keywords come
+      // from the configured company profile (product names, terminology,
+      // domain labels), so the fallback adapts to whatever company is loaded.
+      // With no profile yet, there are no keywords and the fallback stays
+      // inert — the LLM gate handles scope in the normal (online) case.
+      function companyKeywords(slot) {
+        const p = slot && slot.companyProfile;
+        if (!p) return [];
+        const out = [];
+        const push = s => { s = String(s || '').trim(); if (s.length >= 3) out.push(s); };
+        push(p.name);
+        (p.products || []).forEach(push);
+        (p.terminology || []).forEach(push);
+        (p.knowledgeDomains || []).forEach(d => {
+          const parts = String(d || '').split('.');
+          if (parts.length >= 2) push(parts[parts.length - 2]);
+        });
+        return out;
+      }
+      function techTopicRe(slot) {
+        const kw = companyKeywords(slot || STATE.slots[0]);
+        const esc = kw.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).filter(Boolean);
+        if (!esc.length) return null;
+        try { return new RegExp('\\b(' + esc.join('|') + ')\\b', 'i'); } catch { return null; }
+      }
       const QUESTIONISH_RE = /\?|\b(how|what|why|when|where|which|who|can|could|does|do(?:es)?n.?t|did|is|are|will|would|should)\b[\s\S]{3,}|^(walk me through|tell me|explain|show me)/i;
       // Statement-form technical needs: a problem/goal/pain marker near an
       // in-scope topic ("we keep struggling with third-party patching", "no
@@ -728,7 +792,8 @@
       // keeps the SE useful while the LLM gate is unreachable.
       const NEED_MARKER_RE = /\b(struggl(?:e|ing)|trouble|issue|issues|problem|problems|pain|painful|challeng(?:e|ing)|broke(?:n)?|break(?:s|ing)?|fail(?:s|ing|ed)?|can.?t|cannot|can not|unable|no (?:clean |good |easy )?way|hard to|difficult|messy|a mess|need(?:s|ed)? to|trying to|want to|wish (?:we|i)|looking (?:for|to)|figure out|deal with)\b/i;
       function looksLikeTechQuestion(t) {
-        return TECH_TOPIC_RE.test(t) && (QUESTIONISH_RE.test(t) || NEED_MARKER_RE.test(t));
+        const re = techTopicRe();
+        return !!re && re.test(t) && (QUESTIONISH_RE.test(t) || NEED_MARKER_RE.test(t));
       }
 
       // Tight question shapes for the fast path: clearly-formed technical
@@ -736,7 +801,8 @@
       // still go through the classifier.
       const INSTANT_QUESTION_RE = /^(how|what|why|when|where|which|who|can|could|does|do|did|is|are|will|would|should|tell me|walk me through|explain|show me)\b|\b(how (do|does|did|can|could|would|will)|what (is|are|about|does|happens)|can (it|you|we|they)|does (it|that|this)|is there|are there)\b/i;
       function isInstantTechQuestion(t) {
-        return TECH_TOPIC_RE.test(t) && INSTANT_QUESTION_RE.test(t);
+        const re = techTopicRe();
+        return !!re && re.test(t) && INSTANT_QUESTION_RE.test(t);
       }
 
       // Commercial / non-technical asks an SE shouldn't auto-answer on a live
@@ -747,46 +813,37 @@
       // classifier round-trip — it never drops a question on its own.
       const OUT_OF_SCOPE_RE = /\bhow much (?:do(?:es)?|is|are|would|will)\b|\b(pric(?:e|ing|ed)|quote|discount|per[\s-]?(?:seat|device|user)|license(?:s|ing)? (?:cost|fee|price|pricing)|renewal|contract|invoice|proposal|budget|sales ?rep|account (?:manager|exec))\b/i;
 
-      // Common speech-to-text garbles of endpoint-management product names.
-      // Applied to overheard utterances before they're classified, answered,
-      // and logged, so Randy reasons over "Intune", not "in tune", and the
-      // tech-topic detector and saved Q&A read cleanly. Kept tight: each
-      // pattern targets a phrase that is overwhelmingly the product on these
-      // calls. Correction never feeds the no-classifier fast path (that still
-      // runs on the raw text), so a wrong guess can only route to the
-      // classifier — it can never auto-answer on its own.
-      const TRANSCRIPT_FIXES = [
-        [/\bin\s?tune\b/gi, 'Intune'],
-        [/\bintunes\b/gi, 'Intune'],
-        [/\bend[\s-]?point(s)?\b/gi, 'endpoint$1'],
-        [/\bauto[\s-]?pilot\b/gi, 'Autopilot'],
-        [/\bco[\s-]?management\b/gi, 'co-management'],
-        [/\bconfig(?:uration)?[\s-]?manager\b/gi, 'ConfigMgr'],
-        [/\bconfig\s?mgr\b/gi, 'ConfigMgr'],
-        [/\bs\.?c\.?c\.?m\.?\b/gi, 'SCCM'],
-        [/\bm\.?e\.?c\.?m\.?\b/gi, 'MECM'],
-        [/\bright[\s-]?click tools\b/gi, 'Right Click Tools'],
-        [/\bapp(?:lication)? workspace\b/gi, 'Application Workspace'],
-        [/\bapplication manager\b/gi, 'Application Manager'],
-        [/\bprivilege manager\b/gi, 'Privilege Manager'],
-        [/\bendpoint insights\b/gi, 'Endpoint Insights'],
-        [/\bliqu(?:id|it|ot)\b/gi, 'Liquit'],
-        [/\bre[\s-]?cast\b/gi, 'Recast'],
-        [/\bpower\s?shell\b/gi, 'PowerShell'],
-        [/\bwin\s?32\b/gi, 'Win32'],
-        [/\bazure a\.?\s?d\.?\b/gi, 'Azure AD'],
-        [/\bgroup polic(y|ies)\b/gi, 'Group Polic$1'],
-        [/\bhybrid[\s-]?join(ed)?\b/gi, 'hybrid join$1']
-      ];
+      // Speech-to-text normalization for the configured company's product and
+      // terminology names. Built from the company profile so a spoken product
+      // name lands in its canonical casing ("application workspace" -> the
+      // product's real name) before it's classified, answered, and logged.
+      // Correction never feeds the no-classifier fast path (that still runs on
+      // the raw text), so a wrong guess can only route to the classifier — it
+      // can never auto-answer on its own. With no profile, this is a no-op.
+      function buildTranscriptFixes(slot) {
+        const p = slot && slot.companyProfile;
+        if (!p) return [];
+        const fixes = [];
+        const terms = [].concat(p.products || [], p.terminology || []);
+        const seen = new Set();
+        for (const term of terms) {
+          const t = String(term || '').trim();
+          if (t.length < 3 || seen.has(t.toLowerCase())) continue;
+          seen.add(t.toLowerCase());
+          const esc = t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          try { fixes.push([new RegExp('\\b' + esc + '\\b', 'gi'), t]); } catch {}
+        }
+        return fixes;
+      }
       function correctTranscript(text) {
         let t = String(text || '');
-        for (const [re, sub] of TRANSCRIPT_FIXES) t = t.replace(re, sub);
+        for (const [re, sub] of buildTranscriptFixes(STATE.slots[0])) t = t.replace(re, sub);
         return t.replace(/\s+/g, ' ').trim();
       }
 
       // Voice turns attach the (slower) web_search tool only when the prompt
       // clearly benefits from live data or product facts.
-      const WEB_SEARCH_HINT_RE = /\b(search|look ?up|latest|news|today|right now|current|price of|weather|stock|score|who won|breaking|recast|liquit|workspace|intune|configmgr|sccm|mecm|right click)\b/i;
+      const WEB_SEARCH_HINT_RE = /\b(search|look ?up|latest|news|today|right now|current|price of|weather|stock|score|who won|breaking)\b/i;
 
       /* ================================================================
        * ENDPOINT + STORAGE KEYS
@@ -816,10 +873,14 @@
       }
       let SESSION_ID = genSessionId();
 
-      const SETTINGS_KEY = 'recast_chatbot_settings';
+      const SETTINGS_KEY = 'se_assistant_settings';
+      // Older builds stored settings under a product-specific key. Read once
+      // for migration so a returning device keeps its configuration.
+      const LEGACY_SETTINGS_KEYS = ['recast_chatbot_settings'];
       // Legacy key from when history was cached on disk. Never written
       // anymore — kept only so startup can clear stale data from old builds.
-      const HISTORY_KEY  = 'recast_chat_history';
+      const HISTORY_KEY  = 'se_assistant_history';
+      const LEGACY_HISTORY_KEYS = ['recast_chat_history'];
 
       /* ================================================================
        * STATE
@@ -856,14 +917,21 @@
           abortController: null,        // abort the in-flight proxy fetch
           ttsQueue: null,               // FIFO of sentence TTS utterances
           speakAnswers: false,          // read answers out loud
-          allowedDomains: DEFAULT_RESEARCH_DOMAINS.slice()
+          allowedDomains: DEFAULT_RESEARCH_DOMAINS.slice(),
+          // Researched company profile (Settings → Refresh). null until the
+          // user points the assistant at a company. Drives the persona, the
+          // live-call classifier scope, branding, and transcript correction —
+          // this is what makes the assistant a swappable "virtual SE".
+          companyProfile: null,
+          // Generated in-scope topics for the live-call gate, from research.
+          classifierScope: ''
         };
       }
 
       // Settings is gated behind this password (asked once per page load).
       // Note: this is a soft lock against casual clicks, not real security —
       // anyone reading the page source can see it.
-      const SETTINGS_PASSWORD = 'recast2026';
+      const SETTINGS_PASSWORD = 'assistant2026';
 
       const STATE = {
         activeTab: 'home',
@@ -881,6 +949,10 @@
         // The "How should Randy listen?" chooser shown when turning Randy on.
         audioChooserOpen: false,
         settingsUnlocked: false,
+        // Transient state for the Settings → Refresh company research run.
+        // The researched result itself lives on slot.companyProfile; this only
+        // tracks the in-progress / error UI.
+        research: { running: false, error: '' },
         slots: [makeSlot()]
       };
 
@@ -1050,7 +1122,13 @@
           voicePersonality: s.voicePersonality,
           speakAnswers: !!s.speakAnswers,
           audioMode: s.audioMode === 'one-way' ? 'one-way' : 'two-way',
-          allowedDomains: s.allowedDomains
+          allowedDomains: s.allowedDomains,
+          // The researched company profile and the generated live-call scope.
+          // Cached on this device so the configured virtual SE survives a
+          // reload and stays put until the user hard-resets (Reset Defaults
+          // or clearing site data).
+          companyProfile: s.companyProfile || null,
+          classifierScope: s.classifierScope || ''
         }));
         try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(data)); } catch {}
       }
@@ -1062,16 +1140,27 @@
       const LEGACY_PROMPT_MARKERS = [
         "Recast Software's Application Workspace expert",
         'ABSOLUTE RULE — NO EXCEPTIONS',
-        // Distinctive line from the persona default that shipped before the
-        // "Honesty About Capabilities" section was added. Returning users have
-        // that older default cached; matching it here refreshes them to the
-        // current RANDY_PERSONA so the honesty rules actually reach them.
-        'Your research process is invisible.'
+        // Distinctive lines from previous product-specific defaults. A cached
+        // prompt containing any of these is treated as an unmodified old
+        // default and refreshed to the current generic RANDY_PERSONA, so a
+        // returning device doesn't stay stuck on the old Recast-branded
+        // persona after the app became company-agnostic.
+        'You are Randy, a solution engineer at Recast Software',
+        'Product Bias — Application Workspace',
+        'RIGHT: "Application Workspace is...'
       ];
 
       function loadSettings() {
         try {
-          const raw = localStorage.getItem(SETTINGS_KEY);
+          let raw = localStorage.getItem(SETTINGS_KEY);
+          // Migrate from an older product-specific key on first load so a
+          // returning device keeps its saved configuration.
+          if (!raw) {
+            for (const k of LEGACY_SETTINGS_KEYS) {
+              const legacy = localStorage.getItem(k);
+              if (legacy) { raw = legacy; break; }
+            }
+          }
           if (!raw) return;
           const data = JSON.parse(raw);
           data.forEach((d, i) => {
@@ -1089,6 +1178,14 @@
             if (Array.isArray(d.allowedDomains)) {
               s.allowedDomains = d.allowedDomains.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
             }
+            // Researched company profile + generated live-call scope. When a
+            // profile is present we keep the stored persona even if it matches
+            // a legacy marker — only the generic default gets refreshed above.
+            if (d.companyProfile && typeof d.companyProfile === 'object') {
+              s.companyProfile = d.companyProfile;
+              if (isLegacyDefault && d.companyProfile.persona) s.prompt = d.companyProfile.persona;
+            }
+            if (typeof d.classifierScope === 'string') s.classifierScope = d.classifierScope;
           });
         } catch {}
         // Listening always starts OFF — the screen-share picker needs a click.
@@ -1109,8 +1206,12 @@
        * ================================================================ */
 
       // One-time cleanup: older builds cached synced history on disk under
-      // HISTORY_KEY. Clear it so returning devices don't keep stale chats.
-      try { localStorage.removeItem(HISTORY_KEY); } catch {}
+      // the history key. Clear it (and the legacy key) so returning devices
+      // don't keep stale chats.
+      try {
+        localStorage.removeItem(HISTORY_KEY);
+        LEGACY_HISTORY_KEYS.forEach(k => localStorage.removeItem(k));
+      } catch {}
 
       // Assist answers must open with "**Short answer:**". Models occasionally
       // ad-lib a fake-out first ("Great question! ... Just kidding. Here's
@@ -1543,36 +1644,27 @@
         return pool.slice().sort((a, b) => scoreVoice(b) - scoreVoice(a))[0];
       }
 
-      // Pronunciation lexicon — a substitution dictionary applied before text
-      // reaches the speech engine. Three kinds of entries:
-      //   - expansions the field actually says ("ConfigMgr" → "Config Manager",
-      //     "Win32" → "win thirty-two", "v6.2" → "version 6 point 2")
+      // Pronunciation lexicon — a substitution dictionary of GENERIC tech terms
+      // applied before text reaches the speech engine. Two kinds of entries:
+      //   - expansions the field actually says ("Win32" → "win thirty-two",
+      //     "v6.2" → "version 6 point 2")
       //   - letter-by-letter acronyms, spaced out so the engine spells them
-      //   - phonetic respellings for names engines mangle ("Liquit" → "Lickit")
       // Order matters: specific forms before their prefixes (MSIX before MSI,
       // "TCP 443" before bare TCP). All-caps acronyms are deliberately
       // case-SENSITIVE so "IT pros" becomes "I T pros" but "it" never does.
-      // "Azure" is left alone on purpose: engines already say the real word
-      // correctly ("AZH-er"), and a respelling would gamble on worse.
+      // Company- and product-specific names are intentionally NOT hardcoded
+      // here — the assistant adapts to whatever company is configured.
       const TTS_LEXICON = [
         // Expansions and spoken phrasings
-        [/\bConfigMgr\b/gi, 'Config Manager'],          // never read literally
-        [/\b(?:W365|Windows\s*365)\b/gi, 'Windows three sixty-five'],
         [/\bWin32\b/gi, 'win thirty-two'],              // never "win three two"
         [/\bmacOS\b/gi, 'mack oh ess'],                 // never "may-coss"
         [/\bv(\d+(?:\.\d+)+)\b/g, (m, ver) => 'version ' + ver.split('.').join(' point ')],
         [/\bSOC\s*2\b/g, 'sock two'],
         [/\bISO\s*27001\b/gi, 'eye-so twenty-seven thousand one'],
-        [/\bEntra\s+ID\b/gi, 'Entra eye-dee'],
-        [/\bco-management\b/gi, 'co management'],       // pause at the hyphen, not "comanagement"
-        [/\bring-based\b/gi, 'ring based'],
-        [/\bTCP\s+443\b/g, 'T C P four forty-three'],   // IT pros say "four forty-three"
+        [/\bTCP\s+443\b/g, 'T C P four forty-three'],   // people say "four forty-three"
         // Letter-by-letter acronyms
-        [/\bSCCM\b/g, 'S C C M'],                       // engines say "seck-em"
-        [/\bMECM\b/g, 'M E C M'],
         [/\bMSIX\b/g, 'M S I X'],
         [/\bMSI\b/g, 'M S I'],
-        [/\bAVD\b/g, 'A V D'],
         [/\bVDI\b/g, 'V D I'],
         [/\bRDS\b/g, 'R D S'],
         [/\bSSO\b/g, 'S S O'],
@@ -1586,15 +1678,6 @@
         [/\bRBAC\b/g, 'R-back'],
         [/\bLDAP\b/g, 'L-dap'],
         [/\bCSAT\b/g, 'see-sat'],
-        [/\bIntune\b/gi, 'Intoon'],                     // two syllables, never "in-tune-ee"
-        [/\bLiquit\b/gi, 'Lickit'],
-        [/\bOmnissa\b/gi, 'om-nissa'],
-        [/\bNerdio\b/gi, 'nerd-ee-oh'],
-        [/\bOkta\b/gi, 'Octa'],
-        [/\bCitrix\b/gi, 'sit-ricks'],
-        [/\bWinget\b/gi, 'win-get'],
-        [/\bJumpCloud\b/gi, 'jump cloud'],
-        [/\bChocolatey\b/gi, 'chocolate-ee'],
         [/\bKubernetes\b/gi, 'koo-ber-net-eez']
       ];
 
@@ -1609,7 +1692,7 @@
           .replace(/\bi\.e\.,?\s*/gi, 'that is, ')
           .replace(/\betc\.(\s|$)/gi, 'and so on$1')
           .replace(/\bvs\.?(\s|$)/gi, 'versus$1')
-          .replace(/(\w)\s*\/\s*(\w)/g, '$1 or $2')     // "Intune/ConfigMgr"
+          .replace(/(\w)\s*\/\s*(\w)/g, '$1 or $2')     // "A/B" → "A or B"
           .replace(/\s*&\s*/g, ' and ')
           .replace(/\s+[—–]\s+/g, ', ')                 // dashes don't pause; commas do
           .replace(/\s*\(\s*/g, ', ')
@@ -2253,7 +2336,7 @@
         if (target === null) { clearInterim(); return; }
 
         // Show the corrected wording in the live band so product names read
-        // right as they stream ("Intune", not "in tune"). Echo/dedupe above and
+        // right as they stream (canonical casing, not a garble). Echo/dedupe above and
         // the answer pipeline still run on the raw transcript — this is a
         // display-only polish on the partial.
         const display = correctTranscript(trimmed) || trimmed;
@@ -3044,7 +3127,7 @@
           drainQuestionQueue();
           return;
         }
-        // Repair common ASR garbles of product names ("in tune" → "Intune")
+        // Repair common ASR garbles of the configured company's product names
         // so detection, the answer, and the saved log all read the real
         // term. The fast-path test below still runs on the RAW candidate, so
         // a correction can only ever route to the classifier, never create a
@@ -3195,7 +3278,7 @@
         const data = await postChat({
           model: MODELS.classifier,
           max_tokens: 200,
-          system: CLASSIFIER_SYSTEM,
+          system: buildClassifierSystem(STATE.slots[0]),
           messages: [{ role: 'user', content: userContent }],
           output_config: { format: { type: 'json_schema', schema: CLASSIFIER_SCHEMA } },
           save: false // keep classifier churn out of the history sheet
@@ -3311,6 +3394,24 @@
         return [{ type: 'text', text, cache_control: { type: 'ephemeral' } }];
       }
 
+      // The configured company's display name (or '' before one is set).
+      // Drives the dynamic branding shown around the app.
+      function companyName() {
+        const p = STATE.slots[0] && STATE.slots[0].companyProfile;
+        return (p && p.name) ? String(p.name).trim() : '';
+      }
+
+      // The web_search tool, restricted to the slot's knowledge domains when
+      // any are set. With none configured (no company yet), allowed_domains is
+      // omitted so search can still answer against the whole web rather than
+      // an empty allow-list.
+      function buildSearchTool(slot, maxUses) {
+        const domains = ((slot && slot.allowedDomains) || []).filter(Boolean);
+        const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: maxUses };
+        if (domains.length) tool.allowed_domains = domains;
+        return tool;
+      }
+
       function conversationPayloadMessages(slot, cap) {
         return slot.messages
           .filter(m => (m.role === 'user' || m.role === 'assistant') && m.content)
@@ -3353,15 +3454,13 @@
           // rather than streaming token-by-token the way the voice path does.
           const sessionIdAtSend = SESSION_ID;
 
-          // Strictly source only from the approved doc URLs. Without this,
-          // chat web_search ran against the open web and could surface facts
-          // from unvetted sites — the cause of inaccurate answers. Mirror the
-          // technical-assist path: restrict to the allow-list, and fall back to
-          // the default research domains so a wiped Settings box can never
-          // silently re-open the whole web.
-          const domains = (slot.allowedDomains || []).filter(Boolean);
-          const allowed = domains.length ? domains : DEFAULT_RESEARCH_DOMAINS.slice();
-          const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: ASSIST.SEARCH_MAX_USES, allowed_domains: allowed };
+          // Strictly source only from the configured knowledge domains. Without
+          // this, chat web_search ran against the open web and could surface
+          // facts from unvetted sites — the cause of inaccurate answers. Once a
+          // company is configured (Settings → Refresh) the allow-list is its
+          // validated knowledge domains; before then there are none and search
+          // runs against the whole web.
+          const tool = buildSearchTool(slot, ASSIST.SEARCH_MAX_USES);
 
           // The empty assistant placeholder is already excluded by the
           // content filter inside conversationPayloadMessages.
@@ -3607,7 +3706,7 @@
 
         try {
           // Context: the last few assist Q&A pairs keep follow-up questions
-          // coherent ("and what about Intune?") without dragging latency.
+          // coherent ("and what about the second one?") without dragging latency.
           // Pulled from TECH.recentPairs, not the chat — the chat is archived
           // to History before each new question.
           const prior = [];
@@ -3616,13 +3715,10 @@
             prior.push({ role: 'assistant', content: p.answer });
           }
 
-          // Strictly source only from the approved doc URLs. Fall back to the
-          // default research domains when the Settings box is empty so a wiped
-          // allow-list can never silently re-open the whole web — same hard
-          // enforcement the chat/voice path uses.
-          const domains = (slot.allowedDomains || []).filter(Boolean);
-          const allowed = domains.length ? domains : DEFAULT_RESEARCH_DOMAINS.slice();
-          const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: ASSIST.SEARCH_MAX_USES, allowed_domains: allowed };
+          // Source only from the configured knowledge domains when a company is
+          // set up; before then there are none and search runs against the
+          // whole web — same enforcement the chat path uses.
+          const tool = buildSearchTool(slot, ASSIST.SEARCH_MAX_USES);
 
           const sessionIdAtSend = SESSION_ID;
           const baseBody = {
@@ -3727,6 +3823,189 @@
         drainQuestionQueue();
       }
 
+      /* ================================================================
+       * COMPANY RESEARCH ENGINE (Settings → Refresh)
+       *
+       * Turns a company URL into a full virtual-SE configuration: the model
+       * researches the company with web search and returns a profile that
+       * includes a persona written for that company and the live-call gate's
+       * in-scope topics. The support site and knowledge domains are then
+       * probed for reachability so the UI can show green checkmarks. Nothing
+       * is persisted until the user clicks Save (caches to this device).
+       * ================================================================ */
+
+      // Pull the first balanced-looking JSON object out of a model reply.
+      function parseJsonObject(text) {
+        const m = String(text || '').match(/\{[\s\S]*\}/);
+        if (!m) return null;
+        try { return JSON.parse(m[0]); } catch { return null; }
+      }
+
+      // Bare hostname for a URL or domain ("https://www.x.com/a" -> "x.com").
+      function hostOnly(u) {
+        let s = String(u || '').trim();
+        if (!s) return '';
+        try {
+          if (!/^https?:\/\//i.test(s)) s = 'https://' + s;
+          return new URL(s).hostname.replace(/^www\./i, '').toLowerCase();
+        } catch {
+          return s.replace(/^https?:\/\//i, '').replace(/^www\./i, '').split('/')[0].toLowerCase();
+        }
+      }
+
+      // Normalize the raw research JSON into the profile object the app uses.
+      // Throws a soft error (err.soft) when the company can't be identified so
+      // the caller can show a friendly retry message rather than a crash.
+      function normalizeProfile(j, url, sources) {
+        j = j || {};
+        if (j.found === false || !j.company_name) {
+          const e = new Error("Couldn't identify a company from that URL. Double-check the address and try again.");
+          e.soft = true;
+          throw e;
+        }
+        const domains = [];
+        const seen = new Set();
+        const addDomain = d => { const h = hostOnly(d); if (h && !seen.has(h)) { seen.add(h); domains.push(h); } };
+        (Array.isArray(j.knowledge_domains) ? j.knowledge_domains : []).forEach(addDomain);
+        // Always include the support site's host and the entered company host.
+        addDomain(j.support_url);
+        addDomain(url);
+        const list = (v, n) => (Array.isArray(v) ? v : []).map(x => String(x || '').trim()).filter(Boolean).slice(0, n);
+        return {
+          name: String(j.company_name || '').trim(),
+          url: url,
+          description: String(j.description || '').trim(),
+          industry: String(j.industry || '').trim(),
+          audience: String(j.audience || '').trim(),
+          products: list(j.products, 12),
+          supportUrl: String(j.support_url || '').trim(),
+          knowledgeDomains: domains.slice(0, 12),
+          terminology: list(j.terminology, 16),
+          persona: String(j.persona || '').trim(),
+          classifierScope: String(j.classifier_scope || '').trim(),
+          sources: Array.isArray(sources) ? sources.slice(0, 8) : [],
+          refreshedAt: Date.now(),
+          validation: { companyUrl: 'unknown', supportUrl: 'unknown', domains: {} }
+        };
+      }
+
+      // Research a company from its URL via the proxy + web search.
+      async function researchCompany(url, seeds, signal) {
+        const tool = { type: SEARCH_TOOL, name: 'web_search', max_uses: 4 };
+        const userContent =
+          'Company website: ' + url + '\n' +
+          (seeds && seeds.length ? 'Known knowledge-source URLs (treat as authoritative):\n' + seeds.join('\n') + '\n' : '') +
+          '\nResearch this company using web search, then return ONLY the JSON profile.';
+        const data = await postChat({
+          model: MODELS.chat,
+          max_tokens: 2400,
+          output_config: { effort: 'medium' },
+          system: systemBlocks(COMPANY_RESEARCH_SYSTEM),
+          messages: [{ role: 'user', content: userContent }],
+          tools: [tool],
+          save: false
+        }, signal, 90000);
+        const parsed = parseJsonObject(String(data.reply || ''));
+        if (!parsed) {
+          const e = new Error("Couldn't read the research result. Try Refresh again.");
+          e.soft = true;
+          throw e;
+        }
+        const profile = normalizeProfile(parsed, url, data.sources);
+        if (!profile.persona) {
+          const e = new Error('Research came back without a usable persona. Try Refresh again.');
+          e.soft = true;
+          throw e;
+        }
+        return profile;
+      }
+
+      // Best-effort reachability check. A no-cors GET resolves (opaque) for any
+      // site that responds and rejects on DNS / network failure — enough to
+      // confirm a domain is real without tripping CORS. Resolves to 'ok' or
+      // 'fail' and never throws.
+      function probeUrl(u) {
+        return new Promise(resolve => {
+          let url = String(u || '').trim();
+          if (!url) return resolve('unknown');
+          if (!/^https?:\/\//i.test(url)) url = 'https://' + url;
+          let settled = false;
+          const done = r => { if (!settled) { settled = true; resolve(r); } };
+          const ctrl = new AbortController();
+          const timer = setTimeout(() => { try { ctrl.abort(); } catch {} done('fail'); }, 8000);
+          fetch(url, { mode: 'no-cors', signal: ctrl.signal, redirect: 'follow' })
+            .then(() => { clearTimeout(timer); done('ok'); })
+            .catch(() => { clearTimeout(timer); done('fail'); });
+        });
+      }
+
+      // Probe the company URL, support site, and each knowledge domain, marking
+      // each green/amber as it resolves. Re-renders Settings live so checkmarks
+      // appear progressively. Bails out if a newer profile replaced this one.
+      async function validateProfile(profile) {
+        const slot = STATE.slots[0];
+        const live = () => slot.companyProfile === profile;
+        // Don't yank focus/caret out of a field the user is editing — a full
+        // re-render would. Update the checks live only while no input is
+        // focused; otherwise the new state still shows on the next render.
+        const idle = () => { const a = document.activeElement; return !(a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA')); };
+        const refresh = () => { if (live() && STATE.activeTab === 'settings' && idle()) render(); };
+        const mark = (key, val) => { if (live()) { profile.validation[key] = val; refresh(); } };
+        const markDomain = (d, val) => { if (live()) { profile.validation.domains[d] = val; refresh(); } };
+
+        profile.validation.companyUrl = 'checking';
+        profile.validation.supportUrl = profile.supportUrl ? 'checking' : 'unknown';
+        (profile.knowledgeDomains || []).forEach(d => { profile.validation.domains[d] = 'checking'; });
+        refresh();
+
+        await Promise.all([
+          probeUrl(profile.url).then(r => mark('companyUrl', r)),
+          profile.supportUrl ? probeUrl(profile.supportUrl).then(r => mark('supportUrl', r)) : Promise.resolve(),
+          ...(profile.knowledgeDomains || []).map(d => probeUrl(d).then(r => markDomain(d, r)))
+        ]);
+        refresh();
+      }
+
+      // Settings → Refresh: read the form, research the company, apply the
+      // generated persona/scope/domains to the live slot, then validate URLs.
+      // The result sits in STATE until the user clicks Save.
+      async function runCompanyRefresh() {
+        if (STATE.research.running) return;
+        const slot = STATE.slots[0];
+        const urlEl = document.getElementById('setting-company-url');
+        const domEl = document.getElementById('setting-domains');
+        const labelEl = document.getElementById('setting-label');
+        const url = (urlEl ? urlEl.value : '').trim();
+        const seeds = (domEl ? domEl.value : '').split('\n').map(s => s.trim()).filter(Boolean);
+        if (labelEl && labelEl.value.trim()) slot.label = labelEl.value.trim();
+        if (!url) { showToast('Enter a company URL first'); return; }
+
+        // Preserve what the user typed across the re-render while researching.
+        slot.companyProfile = Object.assign({}, slot.companyProfile, {
+          url,
+          knowledgeDomains: seeds.length ? seeds : ((slot.companyProfile && slot.companyProfile.knowledgeDomains) || [])
+        });
+        STATE.research = { running: true, error: '' };
+        render();
+
+        try {
+          const profile = await researchCompany(url, seeds);
+          slot.companyProfile = profile;
+          if (profile.persona) slot.prompt = profile.persona;
+          slot.classifierScope = profile.classifierScope || '';
+          slot.allowedDomains = (profile.knowledgeDomains || []).slice();
+          slot.voiceName = slot.label || slot.voiceName || 'Randy';
+          STATE.research = { running: false, error: '' };
+          render();
+          showToast('Research complete — review the green checks, then Save');
+          validateProfile(profile);   // async; re-renders as each check resolves
+        } catch (err) {
+          STATE.research = { running: false, error: err && err.message ? err.message : 'Research failed. Check the connection and try again.' };
+          render();
+          if (!(err && err.soft)) console.error('company research failed:', err);
+        }
+      }
+
       function scrollChat() {
         setTimeout(() => {
           const el = document.getElementById('chat-scroll');
@@ -3797,6 +4076,9 @@
         restoreScroll(scroll);
         bindEvents();
         if (PIP.window) renderPip();
+        const cn = companyName();
+        const who = STATE.slots[0].label || 'Randy';
+        document.title = who + ' — ' + (cn ? cn + ' SE Assistant' : 'Virtual SE Assistant');
       }
 
       /* ---------- voice state machine (shared by hero orb + header pill) ---------- */
@@ -3877,7 +4159,7 @@
         return `
           <aside class="sidebar ${STATE.historyOpen ? 'open' : ''}" data-screen-label="Sidebar">
             <div class="sb-brand">
-              <span class="sb-logo"><span class="lg-re">Re</span>cast</span>
+              <span class="sb-logo">${companyName() ? escHtml(companyName()) : 'Virtual SE'}</span>
               <span class="sb-tagline">SE Assistant</span>
               <button class="sb-close" data-action="toggle-history" title="Close menu" aria-label="Close menu">
                 <i data-lucide="x" class="w-4 h-4"></i>
@@ -3960,7 +4242,7 @@
           : slot.loading ? 'Thinking…'
           : vm.live && vm.statusClass === 'listening' && vm.pill === 'live' ? 'Listening to you…'
           : on ? 'Listening for tech questions'
-          : 'Online · Recast product expert';
+          : ('Online · ' + (companyName() ? escHtml(companyName()) + ' ' : '') + 'product expert');
         return `
           <header class="chat-head">
             <button class="icon-btn sb-toggle" data-action="toggle-history" title="Conversations" aria-label="Open conversations">
@@ -4030,7 +4312,7 @@
         if (slot.loading) {
           const lastUser = slot.messages.slice().reverse().find(m => m.role === 'user');
           const researching = lastUser && lastUser.kind === 'assist-q';
-          return { stageKey: 'researching', orbLabel: researching ? 'Researching' : 'Answering', icon: 'search', label: researching ? 'Researching the support docs' : 'Writing the answer', sub: researching ? 'Checking Recast & Microsoft documentation' : 'Putting the answer together', mode: 'question', text: lastUser ? lastUser.content : '' };
+          return { stageKey: 'researching', orbLabel: researching ? 'Researching' : 'Answering', icon: 'search', label: researching ? 'Researching the support docs' : 'Writing the answer', sub: researching ? ('Checking ' + (companyName() ? companyName() + '’s' : 'the') + ' documentation') : 'Putting the answer together', mode: 'question', text: lastUser ? lastUser.content : '' };
         }
         if (TECH.pending) return { stageKey: 'analyzing', orbLabel: 'Analyzing', icon: 'scan-search', label: 'Analyzing the question', sub: 'Deciding whether this needs an answer', mode: 'question', text: TECH.activeText || VOICE.interimText || '' };
         if (slot.listenOn) return { stageKey: 'listening', orbLabel: 'Listening', icon: 'ear', label: 'Listening for questions', sub: 'Randy is on the call — speak naturally', mode: 'transcript', text: VOICE.interimText || '' };
@@ -4077,9 +4359,9 @@
       function renderHomeEmpty(slot) {
         return `
           <div style="max-width:520px;margin:0 auto;text-align:center;padding:7vh 20px 24px;display:flex;flex-direction:column;align-items:center;gap:14px">
-            <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--n400)">Recast · SE Assistant</div>
+            <div style="font-size:11px;font-weight:700;letter-spacing:0.12em;text-transform:uppercase;color:var(--n400)">${companyName() ? escHtml(companyName()) : 'Virtual'} · SE Assistant</div>
             <h2 style="font-size:26px;font-weight:700;letter-spacing:-0.02em;color:var(--navy-deep);margin:0">Hey, I&rsquo;m ${escHtml(slot.voiceName || slot.label)}.</h2>
-            <p style="font-size:14.5px;line-height:1.65;color:var(--gray);margin:0;text-wrap:pretty">Your Recast product expert. Use the mic below and I&rsquo;ll listen to your call, catch the technical questions, and answer them right here &mdash; or just type to me anytime.</p>
+            <p style="font-size:14.5px;line-height:1.65;color:var(--gray);margin:0;text-wrap:pretty">Your ${companyName() ? escHtml(companyName()) + ' ' : ''}product expert. Use the mic below and I&rsquo;ll listen to your call, catch the technical questions, and answer them right here &mdash; or just type to me anytime.</p>
           </div>`;
       }
 
@@ -4226,7 +4508,7 @@
             </button>
             <div class="head-titles">
               <div class="conv-title">Settings</div>
-              <div class="conv-sub">Randy&rsquo;s persona, research domains, and voice</div>
+              <div class="conv-sub">Company profile, ${escHtml(STATE.slots[0].label || 'the assistant')}&rsquo;s persona, and voice</div>
             </div>
           </header>
           <div class="settings-scroll">
@@ -4282,12 +4564,114 @@
 
       /* ---------- settings ---------- */
 
+      // One validation indicator — a green check when we reached the site,
+      // amber when we couldn't auto-verify it, a "checking…" label mid-probe.
+      function valIcon(state) {
+        if (state === 'ok')   return '<i data-lucide="check-circle-2" class="w-4 h-4" style="color:#0F7A3F"></i>';
+        if (state === 'fail') return '<i data-lucide="alert-triangle" class="w-4 h-4" style="color:#b45309"></i>';
+        if (state === 'checking') return '<span style="font-size:10.5px;color:#64748b;white-space:nowrap">checking…</span>';
+        return '<i data-lucide="circle-dashed" class="w-4 h-4" style="color:#cbd5e1"></i>';
+      }
+
+      function renderProfileRow(label, valueHtml, state) {
+        return `
+          <div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid #eef2f7">
+            <div style="width:20px;display:grid;place-items:center;flex:none">${valIcon(state)}</div>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8">${escHtml(label)}</div>
+              <div style="font-size:13px;color:#334155;word-break:break-all">${valueHtml}</div>
+            </div>
+          </div>`;
+      }
+
+      // The Company Profile card: URL + knowledge URLs + Refresh, and the
+      // validated research results with green checkmarks once Refresh runs.
+      function renderCompanyProfile(slot) {
+        const r = STATE.research || {};
+        const p = slot.companyProfile || {};
+        const hasProfile = !!(p && p.name);
+        const urlVal = escAttr(p.url || '');
+        const domainList = (slot.allowedDomains && slot.allowedDomains.length) ? slot.allowedDomains : (p.knowledgeDomains || []);
+        const domainsVal = escHtml(domainList.join('\n'));
+        const httpify = u => /^https?:\/\//i.test(u) ? u : 'https://' + u;
+        const chips = arr => (arr || []).map(x => `<span style="display:inline-block;font-size:11px;background:#eef2ff;color:#3730a3;border-radius:999px;padding:3px 9px;margin:0 4px 4px 0">${escHtml(x)}</span>`).join('');
+
+        let results = '';
+        if (r.running) {
+          results = `
+            <div style="margin-top:12px;padding:14px;border:1px solid #e2e8f0;border-radius:12px;background:#f8faff">
+              <div style="display:flex;align-items:center;gap:10px;font-size:13px;color:#334155;font-weight:600">
+                <span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span>
+                Researching ${escHtml(p.url || 'the company')}…
+              </div>
+              <p style="font-size:11.5px;color:#64748b;margin:8px 0 0">Reading the site, finding the support docs, and rewriting ${escHtml(slot.label || 'the assistant')}&rsquo;s instructions. This can take 20&ndash;40 seconds.</p>
+            </div>`;
+        } else if (r.error) {
+          results = `
+            <div style="margin-top:12px;padding:14px;border:1px solid #fecaca;border-radius:12px;background:#fef2f2">
+              <div style="display:flex;align-items:flex-start;gap:8px;font-size:13px;color:#b91c1c;font-weight:600"><i data-lucide="alert-circle" class="w-4 h-4" style="flex:none;margin-top:1px"></i><span>${escHtml(r.error)}</span></div>
+            </div>`;
+        } else if (hasProfile) {
+          const v = p.validation || { domains: {} };
+          const domainRows = (p.knowledgeDomains || []).map(d =>
+            renderProfileRow('Knowledge source', `<a href="${escAttr(httpify(d))}" target="_blank" rel="noopener noreferrer">${escHtml(d)}</a>`, (v.domains || {})[d])
+          ).join('');
+          results = `
+            <div style="margin-top:12px;padding:14px 16px;border:1px solid #e2e8f0;border-radius:12px;background:#fff">
+              <div style="display:flex;align-items:center;gap:8px">
+                <span style="width:8px;height:8px;border-radius:50%;background:#10b981;flex:none"></span>
+                <strong style="font-size:14px;color:var(--navy)">Configured for ${escHtml(p.name)}</strong>
+              </div>
+              ${p.description ? `<p style="font-size:12.5px;color:#475569;margin:6px 0 2px">${escHtml(p.description)}</p>` : ''}
+              ${renderProfileRow('Company site', `<a href="${escAttr(httpify(p.url || ''))}" target="_blank" rel="noopener noreferrer">${escHtml(p.url || '')}</a>`, v.companyUrl)}
+              ${renderProfileRow('Support / documentation', p.supportUrl ? `<a href="${escAttr(httpify(p.supportUrl))}" target="_blank" rel="noopener noreferrer">${escHtml(p.supportUrl)}</a>` : '<span style="color:#94a3b8">none found</span>', v.supportUrl)}
+              ${domainRows}
+              <div style="border-top:1px solid #eef2f7;padding-top:10px;margin-top:8px">
+                ${p.industry ? `<div style="font-size:11.5px;color:#64748b;margin-bottom:4px"><strong style="color:#475569">Industry:</strong> ${escHtml(p.industry)}</div>` : ''}
+                ${p.audience ? `<div style="font-size:11.5px;color:#64748b;margin-bottom:6px"><strong style="color:#475569">Audience:</strong> ${escHtml(p.audience)}</div>` : ''}
+                ${(p.products && p.products.length) ? `<div style="margin-bottom:6px"><div style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:4px">Products</div>${chips(p.products)}</div>` : ''}
+                ${(p.terminology && p.terminology.length) ? `<div><div style="font-size:10px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:4px">Terminology</div>${chips(p.terminology)}</div>` : ''}
+              </div>
+              <p style="font-size:11.5px;color:#0F7A3F;margin:10px 0 0;display:flex;gap:6px;align-items:flex-start"><i data-lucide="check-circle-2" class="w-4 h-4" style="flex:none;margin-top:1px"></i><span>Green checks are sites we reached and verified. Amber means we couldn&rsquo;t auto-verify it (the site may block bots) &mdash; open it to confirm. ${escHtml(slot.label || 'The assistant')}&rsquo;s persona and live-call topics were rewritten for ${escHtml(p.name)} &mdash; review the persona below, then <strong>Save</strong> to cache it on this device.</span></p>
+            </div>`;
+        } else {
+          results = `
+            <div style="margin-top:12px;padding:14px;border:1px dashed #cbd5e1;border-radius:12px;background:#f8faff">
+              <p style="font-size:12px;color:#64748b;margin:0">Enter a company&rsquo;s website and click <strong>Refresh</strong>. ${escHtml(slot.label || 'The assistant')} researches the company, validates its support site, and rewrites its own instructions to match &mdash; so you can point this at any company in any industry.</p>
+            </div>`;
+        }
+
+        return `
+          <div class="full" style="border:1px solid #e2e8f0;border-radius:14px;padding:16px;background:linear-gradient(180deg,#fbfdff,#ffffff)">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <i data-lucide="building-2" class="w-4 h-4" style="color:var(--primary)"></i>
+              <h3 class="text-base font-semibold" style="color:var(--navy);margin:0">Company Profile</h3>
+            </div>
+            <p style="font-size:11.5px;color:#64748b;margin:0 0 12px">Point the assistant at a company. Refresh researches it, validates the support site, and adapts the persona and live-call topics automatically.</p>
+
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5"><i data-lucide="link" class="w-3 h-3 inline mr-1"></i>Company URL</label>
+            <input type="url" id="setting-company-url" value="${urlVal}" placeholder="https://www.example.com" autocomplete="off" />
+
+            <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5 mt-3"><i data-lucide="globe" class="w-3 h-3 inline mr-1"></i>Knowledge Source URLs <span class="text-slate-400 normal-case">(optional &mdash; one per line)</span></label>
+            <textarea id="setting-domains" rows="3" placeholder="docs.example.com&#10;support.example.com">${domainsVal}</textarea>
+            <p class="text-[11px] text-slate-400 mt-1">Seed any docs/support sites you already know. Refresh fills and validates these; technical-assist answers research only these domains.</p>
+
+            <button class="btn-primary mt-3" data-action="refresh-company" ${r.running ? 'disabled style="opacity:0.7;cursor:default"' : ''}>
+              <i data-lucide="${r.running ? 'loader' : 'refresh-cw'}" class="w-4 h-4 inline mr-1"></i> ${r.running ? 'Researching…' : 'Refresh — research &amp; validate'}
+            </button>
+
+            ${results}
+          </div>`;
+      }
+
       function renderSettings() {
         const es = STATE.editingSlot;
         const slot = STATE.slots[es];
         return `
           <div class="space-y-4">
             <div class="settings-section settings-grid">
+              ${renderCompanyProfile(slot)}
+
               <div class="full flex items-center gap-3">
                 <div class="w-9 h-9 rounded-full grid place-items-center text-white font-bold" style="background:var(--primary)">${escHtml(slot.label.charAt(0))}</div>
                 <h3 class="text-lg font-semibold" style="color:var(--navy)">${escHtml(slot.label)} — Configuration</h3>
@@ -4310,24 +4694,16 @@
                     : `<span style="color:#dc2626"><i data-lucide="x-circle" class="w-3 h-3 inline mr-1"></i>Not reachable${PROXY.error ? ' (' + escHtml(PROXY.error) + ')' : ''}</span>`}
                 </div>
                 <p class="text-[11px] text-slate-400 mt-1">
-                  Randy's answer service is built in — nothing to configure here.
+                  The answer service is built in — nothing to configure here.
                 </p>
               </div>
 
               <div class="full">
                 <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                  <i data-lucide="file-text" class="w-3 h-3 inline mr-1"></i>Randy's Persona (system prompt core)
+                  <i data-lucide="file-text" class="w-3 h-3 inline mr-1"></i>${escHtml(slot.label)}'s Persona <span class="text-slate-400 normal-case">(auto-written by Refresh — editable)</span>
                 </label>
-                <textarea id="setting-prompt" rows="8" placeholder="You are Randy, a solution engineer...">${escHtml(slot.prompt)}</textarea>
-                <p class="text-[11px] text-slate-400 mt-1">Defines who Randy is. Formatting rules for chat replies and technical-assist answers are appended automatically and are not editable here.</p>
-              </div>
-
-              <div class="full">
-                <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">
-                  <i data-lucide="globe" class="w-3 h-3 inline mr-1"></i>Research Domains (technical assistance)
-                </label>
-                <textarea id="setting-domains" rows="4" placeholder="docs.recastsoftware.com&#10;docs.liquit.com">${escHtml((slot.allowedDomains || []).join('\n'))}</textarea>
-                <p class="text-[11px] text-slate-400 mt-1">One domain per line. Technical-assist answers research only these sites (support docs). Leave empty to allow the whole web.</p>
+                <textarea id="setting-prompt" rows="8" placeholder="You are a solution engineer...">${escHtml(slot.prompt)}</textarea>
+                <p class="text-[11px] text-slate-400 mt-1">Defines who the assistant is. Refresh rewrites this for the company above; you can fine-tune it by hand. Response-formatting rules are appended automatically and aren't editable here.</p>
               </div>
 
               <div class="full" style="border-top:1px dashed #e2e8f0;padding-top:16px">
@@ -5295,6 +5671,13 @@
               speakText("Hey, it's Randy. This is how I'll sound when I answer out loud.", idx !== null ? idx : 0);
               break;
             }
+            case 'refresh-company': {
+              // Capture any persona edits before the research re-render, then
+              // research the company and rewrite the assistant's instructions.
+              readFields();
+              runCompanyRefresh();
+              break;
+            }
             case 'save-settings': {
               readFields();
               saveSettings();
@@ -5383,6 +5766,11 @@
               s.voiceName = 'Randy';
               s.voicePersonality = DEFAULT_VOICE_PERSONALITY;
               s.allowedDomains = DEFAULT_RESEARCH_DOMAINS.slice();
+              // Hard-reset the company configuration back to the universal
+              // default — the assistant is no longer tied to any company.
+              s.companyProfile = null;
+              s.classifierScope = '';
+              STATE.research = { running: false, error: '' };
               saveSettings(); render(); break;
             }
           }
@@ -5467,6 +5855,7 @@
         const l = document.getElementById('setting-label');
         const p = document.getElementById('setting-prompt');
         const dm = document.getElementById('setting-domains');
+        const cu = document.getElementById('setting-company-url');
         if (l) s.label = l.value.trim() || s.label;
         if (p) s.prompt = p.value.trim() || s.prompt;
         // The wake-word field is gone; keep voiceName (the hero/display name)
@@ -5474,6 +5863,15 @@
         s.voiceName = s.label;
         if (dm) {
           s.allowedDomains = dm.value.split('\n').map(x => x.trim()).filter(Boolean);
+        }
+        // Keep the entered company URL on the profile so it survives Save even
+        // if the user typed an address but hasn't run Refresh yet.
+        if (cu) {
+          const u = cu.value.trim();
+          if (u) {
+            if (!s.companyProfile) s.companyProfile = { validation: { domains: {} } };
+            s.companyProfile.url = u;
+          }
         }
       }
 
