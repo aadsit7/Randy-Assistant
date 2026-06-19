@@ -877,6 +877,12 @@
       // Older builds stored settings under a product-specific key. Read once
       // for migration so a returning device keeps its configuration.
       const LEGACY_SETTINGS_KEYS = ['recast_chatbot_settings'];
+      // Preferred microphone, chosen in Settings → Voice. Kept on its OWN
+      // localStorage key — separate from the per-persona settings above —
+      // because a microphone is a property of THIS computer's hardware, not
+      // of any assistant. Saving it here caches the choice on the local
+      // machine so the user picks their mic once and it survives reloads.
+      const MIC_DEVICE_KEY = 'randy_mic_device';
       // Legacy key from when history was cached on disk. Never written
       // anymore — kept only so startup can clear stale data from old builds.
       const HISTORY_KEY  = 'se_assistant_history';
@@ -1006,6 +1012,23 @@
         dictating: false,         // dictation actively capturing the mic
         dictationPaused: false,   // passive recognizer paused for dictation
         dictationBase: ''         // finalized dictation text staged in the input
+      };
+
+      // Preferred input device. deviceId/label are the user's saved choice
+      // (cached on this computer under MIC_DEVICE_KEY); devices is the live
+      // list from enumerateDevices(). The empty deviceId means "system
+      // default". Browsers only reveal device labels once mic permission has
+      // been granted, so `permitted` tracks whether the picker can show real
+      // names yet. startListening() applies deviceId to the getUserMedia
+      // constraints; because Chrome shares that one capture with the Web
+      // Speech recognizer, the recognizer ends up listening to the same
+      // device.
+      const MIC = {
+        deviceId: '',     // saved choice; '' = system default
+        label: '',        // saved label, so the pick can be shown by name
+        devices: [],      // [{ deviceId, label }] audio inputs, live
+        permitted: false, // mic permission granted ⇒ labels are readable
+        enumerated: false // enumerateDevices() has run at least once
       };
 
       // Listening runtime state. Randy hears on two channels: (1) the
@@ -1193,6 +1216,94 @@
         // machines pointing at dead deployments. Drop any saved override so
         // every computer uses the hardcoded GSHEET_WEBHOOK.
         try { localStorage.removeItem('recast_gsheet_url'); } catch {}
+      }
+
+      /* ================================================================
+       * MICROPHONE PREFERENCE
+       *
+       * The default input device, chosen in Settings → Voice and cached on
+       * this computer. Web Speech has no API to target a device, but Chrome
+       * reuses an already-open getUserMedia capture for the recognizer, so
+       * pinning the deviceId on that capture (startListening) steers the
+       * recognizer too — the same lever the audio-mode constraints already
+       * rely on.
+       * ================================================================ */
+
+      function saveMicPreference() {
+        try {
+          localStorage.setItem(MIC_DEVICE_KEY, JSON.stringify({ deviceId: MIC.deviceId, label: MIC.label }));
+        } catch {}
+      }
+
+      function loadMicPreference() {
+        try {
+          const raw = localStorage.getItem(MIC_DEVICE_KEY);
+          if (!raw) return;
+          const d = JSON.parse(raw);
+          if (d && typeof d.deviceId === 'string') MIC.deviceId = d.deviceId;
+          if (d && typeof d.label === 'string') MIC.label = d.label;
+        } catch {}
+      }
+
+      // Pull the current list of audio inputs. Labels are blank until mic
+      // permission is granted, so `permitted` is true only once at least one
+      // input reports a name. Re-renders Settings live so the dropdown fills
+      // in as soon as the list (or its labels) changes.
+      async function refreshMicList() {
+        if (!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices)) return;
+        try {
+          const list = await navigator.mediaDevices.enumerateDevices();
+          MIC.devices = list
+            // Real, selectable inputs only. Before permission is granted the
+            // browser returns a single placeholder with an empty deviceId and
+            // no label — dropping it leaves just "System default" + the unlock
+            // button until names are available.
+            .filter(d => d.kind === 'audioinput' && d.deviceId)
+            .map(d => ({ deviceId: d.deviceId, label: d.label }));
+          MIC.permitted = MIC.devices.some(d => d.label);
+          MIC.enumerated = true;
+          // If the saved device is still present, re-sync its label in case
+          // the OS renamed it; if it has vanished, keep the saved id so the
+          // dropdown can still show "(not connected)" rather than silently
+          // resetting the user's choice.
+          if (MIC.deviceId) {
+            const match = MIC.devices.find(d => d.deviceId === MIC.deviceId);
+            if (match && match.label) MIC.label = match.label;
+          }
+          if (STATE.activeTab === 'settings') render();
+        } catch {}
+      }
+
+      // One-time unlock: ask for the mic purely so the browser will hand back
+      // real device labels, then release it immediately and re-enumerate.
+      async function unlockMicLabels() {
+        if (!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia)) return;
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach(t => t.stop());
+          await refreshMicList();
+        } catch {
+          showToast('Randy needs microphone access to list your devices');
+        }
+      }
+
+      // Open the mic with the given constraints, honouring the saved device.
+      // exact so the chosen input is actually used (and so the recognizer,
+      // which reuses this capture, hears the same device); if that device has
+      // since been unplugged we retry on the system default instead of failing
+      // the whole listen.
+      async function openMicStream(baseAudio) {
+        const audio = MIC.deviceId ? { ...baseAudio, deviceId: { exact: MIC.deviceId } } : baseAudio;
+        try {
+          return await navigator.mediaDevices.getUserMedia({ audio });
+        } catch (err) {
+          const gone = err && (err.name === 'OverconstrainedError' || err.name === 'NotFoundError' || err.name === 'NotReadableError');
+          if (gone && MIC.deviceId) {
+            showToast('Saved microphone unavailable — using the system default');
+            return await navigator.mediaDevices.getUserMedia({ audio: baseAudio });
+          }
+          throw err;
+        }
       }
 
       /* ================================================================
@@ -1482,6 +1593,7 @@
       }
 
       loadSettings();
+      loadMicPreference();
 
       /* ================================================================
        * TEXT HELPERS + SAFE MARKDOWN RENDERER
@@ -2507,10 +2619,15 @@
           : { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
         if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
           try {
-            VOICE.micStream = await navigator.mediaDevices.getUserMedia({ audio: micAudio });
+            // openMicStream() applies the user's saved microphone (Settings →
+            // Voice) and falls back to the system default if it's unplugged.
+            VOICE.micStream = await openMicStream(micAudio);
             VOICE.micStream.getTracks().forEach(t => {
               t.onended = () => { VOICE.micStream = null; };
             });
+            // Permission just succeeded, so device labels are now readable —
+            // refresh the list so Settings shows real names next time.
+            refreshMicList();
           } catch (err) {
             showToast('Randy needs the microphone. Click Allow and try again.');
             render();
@@ -4668,6 +4785,45 @@
           </div>`;
       }
 
+      // The "Default Microphone" control in Settings → Voice. Lists every
+      // audio input and persists the pick to this computer. Device names only
+      // appear after mic permission, so until then it offers an unlock button
+      // and falls back to numbered placeholders.
+      function renderMicPicker() {
+        const supported = !!(navigator.mediaDevices && navigator.mediaDevices.enumerateDevices);
+        if (!supported) {
+          return `<p class="text-[11px] text-slate-400 mb-4">This browser can't list microphones, so Randy will use the system default.</p>`;
+        }
+        // Kick off enumeration the first time the picker is shown; refreshMicList
+        // re-renders Settings once the list (and any labels) arrive.
+        if (!MIC.enumerated) refreshMicList();
+
+        const savedPresent = !MIC.deviceId || MIC.devices.some(d => d.deviceId === MIC.deviceId);
+        const opts = [`<option value=""${!MIC.deviceId ? ' selected' : ''}>System default microphone</option>`];
+        MIC.devices.forEach((d, i) => {
+          const name = d.label || `Microphone ${i + 1}`;
+          opts.push(`<option value="${escAttr(d.deviceId)}"${d.deviceId === MIC.deviceId ? ' selected' : ''}>${escHtml(name)}</option>`);
+        });
+        // Saved device not currently plugged in — still show it as selected so
+        // the user's choice isn't silently dropped.
+        if (MIC.deviceId && !savedPresent) {
+          opts.push(`<option value="${escAttr(MIC.deviceId)}" selected>${escHtml(MIC.label || 'Saved microphone')} (not connected)</option>`);
+        }
+
+        return `
+          <div style="margin-bottom:16px">
+            <label class="block text-[11px] font-semibold text-slate-500 uppercase tracking-wide mb-1">Default Microphone <span class="text-slate-400 normal-case">(saved on this computer)</span></label>
+            <select id="setting-mic" style="width:100%;padding:10px 14px;border:2px solid #e2e8f0;border-radius:10px;font-size:14px;background:#fff">
+              ${opts.join('')}
+            </select>
+            ${MIC.permitted ? '' : `
+              <button class="btn-outline" style="font-size:11px;padding:5px 12px;margin-top:8px" data-action="enable-mic-labels">
+                <i data-lucide="mic" class="w-3 h-3 inline mr-1"></i> Allow microphone access to see device names
+              </button>`}
+            <p class="text-[11px] text-slate-400 mt-1">Randy listens through this device. Your choice is cached on this computer and used the next time you start listening.</p>
+          </div>`;
+      }
+
       function renderSettings() {
         const es = STATE.editingSlot;
         const slot = STATE.slots[es];
@@ -4714,6 +4870,8 @@
                 <label class="block text-xs font-semibold text-slate-500 uppercase tracking-wide mb-3">
                   <i data-lucide="mic" class="w-3 h-3 inline mr-1"></i>Voice${VOICE.srSupported ? '' : ' — needs Chrome or Edge'}
                 </label>
+
+                ${renderMicPicker()}
 
                 ${VOICE.ttsSupported ? `
                   <div>
@@ -5675,6 +5833,12 @@
               speakText("Hey, it's Randy. This is how I'll sound when I answer out loud.", idx !== null ? idx : 0);
               break;
             }
+            case 'enable-mic-labels': {
+              // Grab mic permission once so the browser reveals device names,
+              // then the dropdown repopulates with real labels.
+              unlockMicLabels();
+              break;
+            }
             case 'refresh-company': {
               // Capture any persona edits before the research re-render, then
               // research the company and rewrite the assistant's instructions.
@@ -5809,6 +5973,19 @@
           }
         });
 
+        // Default-microphone dropdown: persist the pick to this computer the
+        // moment it changes (no re-render needed — the native select already
+        // shows it), so it survives reloads and is used the next time Randy
+        // starts listening.
+        document.addEventListener('change', e => {
+          if (e.target.id !== 'setting-mic') return;
+          MIC.deviceId = e.target.value || '';
+          const opt = e.target.options[e.target.selectedIndex];
+          MIC.label = MIC.deviceId && opt ? opt.textContent.replace(/\s*\(not connected\)\s*$/, '').trim() : '';
+          saveMicPreference();
+          showToast(MIC.deviceId ? 'Microphone saved — ' + (MIC.label || 'selected device') : 'Using the system default microphone');
+        });
+
         document.addEventListener('keydown', e => {
           if (e.key === 'Enter' && !e.shiftKey && e.target.id === 'expanded-input' && STATE.expandedSlot !== null) {
             e.preventDefault();
@@ -5877,6 +6054,16 @@
             s.companyProfile.url = u;
           }
         }
+        // Capture the default-microphone pick on Save too. The dropdown's
+        // change handler already persists it live; this makes the explicit
+        // "Save Configuration" button reflect the current selection as well.
+        const mic = document.getElementById('setting-mic');
+        if (mic) {
+          MIC.deviceId = mic.value || '';
+          const opt = mic.options[mic.selectedIndex];
+          MIC.label = MIC.deviceId && opt ? opt.textContent.replace(/\s*\(not connected\)\s*$/, '').trim() : '';
+          saveMicPreference();
+        }
       }
 
       /* ================================================================
@@ -5891,6 +6078,15 @@
           window.speechSynthesis.onvoiceschanged = () => {
             if (STATE.activeTab === 'settings') render();
           };
+        }
+        // Discover the available microphones up front (names stay hidden until
+        // permission is granted) and keep the list fresh as devices are
+        // plugged in or removed, so the Settings picker is always current.
+        if (navigator.mediaDevices && navigator.mediaDevices.enumerateDevices) {
+          refreshMicList();
+          if ('ondevicechange' in navigator.mediaDevices) {
+            navigator.mediaDevices.addEventListener('devicechange', refreshMicList);
+          }
         }
         // Listening always starts OFF: turning it on needs a click anyway
         // (the screen-share picker requires a user gesture).
