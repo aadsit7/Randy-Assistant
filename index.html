@@ -1198,7 +1198,11 @@
             // speakAnswers (migrating the older speakResponses key)
             s.speakAnswers = !!(d.speakAnswers !== undefined ? d.speakAnswers : d.speakResponses);
             if (d.audioMode === 'one-way' || d.audioMode === 'two-way') s.audioMode = d.audioMode;
-            if (Array.isArray(d.allowedDomains)) {
+            // Only restore saved knowledge-source domains when a researched
+            // company profile is also present. Without a company there are no
+            // default help-documentation URLs — the field stays empty until the
+            // person enters a company and Refresh fills it in.
+            if (Array.isArray(d.allowedDomains) && d.companyProfile && typeof d.companyProfile === 'object') {
               s.allowedDomains = d.allowedDomains.filter(x => typeof x === 'string' && x.trim()).map(x => x.trim());
             }
             // Researched company profile + generated live-call scope. When a
