@@ -3569,10 +3569,11 @@
         try {
           // Typed chat answers use the exact same recipe as the overheard
           // voice path (ASSIST_STYLE, same effort, same search config, same
-          // reply parsing) so the format and sources are identical no matter
-          // how the question arrived. Two differences: typed chat keeps the
-          // full multi-turn thread for follow-ups, and it answers in one shot
-          // rather than streaming token-by-token the way the voice path does.
+          // reply parsing, same token-by-token streaming) so the format and
+          // sources are identical no matter how the question arrived. Two
+          // differences: typed chat keeps the full multi-turn thread for
+          // follow-ups, and it doesn't auto-read the answer aloud (the manual
+          // speaker button still does, on demand).
           const sessionIdAtSend = SESSION_ID;
 
           // Strictly source only from the configured knowledge domains. Without
@@ -3599,15 +3600,33 @@
             save: false
           };
           let data;
-          try {
-            data = await postChat(Object.assign({ tools: [tool] }, baseBody), controller.signal);
-          } catch (err) {
-            if (err && err.name === 'AbortError') throw err;
-            // Web search failed (tool rejected, timeout, transient error) —
-            // answer from knowledge rather than staying silent. Same fallback
-            // the voice path uses.
-            console.error('search-enabled answer failed, retrying without tools:', err);
-            data = await postChat(baseBody, controller.signal);
+          // Preferred path: stream the reply through the edge proxy when one is
+          // configured, so typed answers fill in token-by-token like the voice
+          // path instead of landing all at once. Text only — typed chat keeps
+          // its no-auto-speak behavior (speak:false); the manual speaker button
+          // still reads an answer on demand. Any transport failure (not a user
+          // cancel) falls through to the non-streaming Apps Script path below,
+          // so configuring STREAM_WEBHOOK can never make typed chat worse.
+          if (STREAM_WEBHOOK) {
+            try {
+              const r = await streamAssistReply(Object.assign({ tools: [tool] }, baseBody), controller.signal, idx, assistantMsgIdx, null, { speak: false });
+              data = { reply: r.reply, sources: r.sources, usage: r.usage };
+            } catch (err) {
+              if (err && err.name === 'AbortError') throw err;
+              console.warn('streaming answer failed — falling back to non-streaming proxy:', err);
+            }
+          }
+          if (!data) {
+            try {
+              data = await postChat(Object.assign({ tools: [tool] }, baseBody), controller.signal);
+            } catch (err) {
+              if (err && err.name === 'AbortError') throw err;
+              // Web search failed (tool rejected, timeout, transient error) —
+              // answer from knowledge rather than staying silent. Same fallback
+              // the voice path uses.
+              console.error('search-enabled answer failed, retrying without tools:', err);
+              data = await postChat(baseBody, controller.signal);
+            }
           }
 
           // Parse exactly like the voice path: strip any false-start preamble,
@@ -3701,7 +3720,7 @@
         return { sentences, consumed: start };
       }
 
-      async function streamAssistReply(body, signal, idx, msgIdx, perf) {
+      async function streamAssistReply(body, signal, idx, msgIdx, perf, opts = {}) {
         const slot = STATE.slots[idx];
         const payload = Object.assign({ action: 'chat', session_id: SESSION_ID }, body, { stream: true });
 
@@ -3715,7 +3734,11 @@
         const onAbort = () => { try { timer.abort(signal.reason); } catch { timer.abort(); } };
         if (signal) { if (signal.aborted) onAbort(); else signal.addEventListener('abort', onAbort, { once: true }); }
 
-        const speakOn = !!slot.speakAnswers;
+        // Whether to read the spoken summary aloud as it streams. Defaults to
+        // the slot's Read-aloud setting (the voice path); typed chat passes
+        // speak:false so it streams text only, preserving its existing
+        // no-auto-speak behavior — the manual speaker button still reads on demand.
+        const speakOn = opts.speak !== undefined ? !!opts.speak : !!slot.speakAnswers;
         let ttsInit = false, streamedTts = false, gotText = false;
         let reply = '', sources = [], usage = null;
         let spokenEmitted = 0, lastRender = 0;
